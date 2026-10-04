@@ -30,6 +30,10 @@ class ConduitTests(unittest.TestCase):
             workspaces["kairos"]["callback_url"],
             "https://chatgpt.com/c/6ac26c6e-9710-83ee-b641-9f17d64cd7a9",
         )
+        self.assertEqual(
+            conduit.load_job_path_prepend(),
+            ["C:/Users/mttge/AppData/Local/Python/bin"],
+        )
 
     def test_invalid_config_errors_are_concise(self):
         with tempfile.TemporaryDirectory(dir=".") as directory:
@@ -65,6 +69,48 @@ class ConduitTests(unittest.TestCase):
             with patch.dict(os.environ, {"SLACK_BOT_TOKEN": "from-os"}, clear=True):
                 conduit.load_dotenv(env_file)
                 self.assertEqual(os.environ["SLACK_BOT_TOKEN"], "from-os")
+
+    def test_build_job_env_sanitizes_python_and_prepends_configured_path(self):
+        parent_env = {
+            "PATH": (
+                r"c:/DEV/CONDUIT/.VENV/Scripts/"
+                + os.pathsep + r"C:\Windows\System32"
+                + os.pathsep + r"C:\Users\mttge\AppData\Local\Microsoft\WindowsApps"
+                + os.pathsep + r"C:\Tools"
+            ),
+            "VIRTUAL_ENV": "C:\\DEV\\CONDUIT\\.venv\\",
+            "PYTHONPATH": r"C:\dev\conduit",
+            "PYTHONHOME": r"C:\Python",
+            "KEEP_ME": "yes",
+        }
+        prepend = r"C:\Users\mttge\AppData\Local\Python\bin"
+        with patch.dict(os.environ, parent_env, clear=True), patch.object(
+            conduit.sys, "prefix", r"C:\dev\conduit\.venv"
+        ), patch.object(conduit, "JOB_PATH_PREPEND", [prepend, prepend.lower()]):
+            job_env = conduit.build_job_env(Path(r"C:\dev\test\.conduit-tmp\job-test"))
+
+        self.assertEqual(
+            job_env["PATH"],
+            prepend + os.pathsep + r"C:\Windows\System32"
+            + os.pathsep + r"C:\Users\mttge\AppData\Local\Microsoft\WindowsApps"
+            + os.pathsep + r"C:\Tools",
+        )
+        for key in ("VIRTUAL_ENV", "PYTHONPATH", "PYTHONHOME"):
+            self.assertNotIn(key, job_env)
+        self.assertEqual(job_env["KEEP_ME"], "yes")
+        self.assertEqual(job_env["TMPDIR"], r"C:\dev\test\.conduit-tmp\job-test")
+        self.assertTrue(parent_env["PATH"].startswith(r"c:/DEV/CONDUIT/.VENV/Scripts/"))
+        self.assertIn("VIRTUAL_ENV", parent_env)
+        self.assertNotIn("TMPDIR", parent_env)
+
+    def test_build_job_env_removes_unrelated_virtual_env(self):
+        with patch.dict(
+            os.environ,
+            {"PATH": r"C:\Tools", "VIRTUAL_ENV": r"C:\dev\kairos\.venv"},
+            clear=True,
+        ), patch.object(conduit.sys, "prefix", r"C:\dev\conduit\.venv"):
+            job_env = conduit.build_job_env(Path(r"C:\dev\test\.conduit-tmp\job-test"))
+        self.assertNotIn("VIRTUAL_ENV", job_env)
 
     def test_ping(self):
         with self.assertLogs(conduit.logger, level="INFO") as logs:
@@ -186,11 +232,27 @@ class ConduitTests(unittest.TestCase):
         self.assertTrue(any("ChatGPT callback failed" in line for line in logs.output))
 
     def test_run_job_passes_instruction_on_stdin(self):
+        observed_job_tmp = None
+
         def fake_run(command, **kwargs):
+            nonlocal observed_job_tmp
             Path(command[command.index("-o") + 1]).write_text("final", encoding="utf-8")
             self.assertEqual(command[command.index("-s") + 1], "workspace-write")
             self.assertEqual(command[-1], "-")
             self.assertEqual(kwargs["input"], "日本語 instruction")
+            job_env = kwargs["env"]
+            observed_job_tmp = Path(job_env["TMPDIR"])
+            self.assertTrue(observed_job_tmp.is_absolute())
+            self.assertTrue(observed_job_tmp.is_dir())
+            self.assertEqual(observed_job_tmp.parent.name, ".conduit-tmp")
+            self.assertTrue(observed_job_tmp.name.startswith("job-"))
+            conduit_scripts = os.path.normcase(os.path.normpath(
+                str(Path(conduit.sys.prefix) / "Scripts")
+            ))
+            self.assertNotIn(
+                conduit_scripts,
+                [os.path.normcase(os.path.normpath(item)) for item in job_env["PATH"].split(os.pathsep)],
+            )
             self.assertEqual(kwargs["encoding"], "utf-8")
             self.assertEqual(kwargs["errors"], "replace")
             return type(
@@ -205,7 +267,32 @@ class ConduitTests(unittest.TestCase):
                 with self.assertLogs(conduit.logger, level="INFO") as logs:
                     result = conduit.run_job(job)
         self.assertEqual(result, (0, "final", ""))
+        self.assertIsNotNone(observed_job_tmp)
+        self.assertFalse(observed_job_tmp.exists())
         self.assertTrue(any("Codex stdout:\ncodex details" in line for line in logs.output))
+
+    def test_run_job_cleans_job_tmp_after_subprocess_exception(self):
+        observed_job_tmp = None
+
+        def failing_run(command, **kwargs):
+            nonlocal observed_job_tmp
+            observed_job_tmp = Path(kwargs["env"]["TMPDIR"])
+            self.assertTrue(observed_job_tmp.is_dir())
+            raise RuntimeError("launch failed")
+
+        with tempfile.TemporaryDirectory(dir=".") as workspace:
+            job = {"job_id": "fail-2", "workspace": "test", "instruction": "test"}
+            with patch.dict(
+                conduit.WORKSPACES,
+                {"test": self.workspace_config(workspace)},
+            ), patch("conduit.shutil.which", return_value=r"C:\bin\codex.cmd"), patch(
+                "conduit.subprocess.run", side_effect=failing_run
+            ):
+                with self.assertRaisesRegex(RuntimeError, "launch failed"):
+                    conduit.run_job(job)
+
+        self.assertIsNotNone(observed_job_tmp)
+        self.assertFalse(observed_job_tmp.exists())
 
 
 if __name__ == "__main__":

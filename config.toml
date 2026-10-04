@@ -1,3 +1,5 @@
+job_path_prepend = ["C:/Users/mttge/AppData/Local/Python/bin"]
+
 [workspaces.conduit]
 path = "C:\\dev\\conduit"
 callback_url = "https://chatgpt.com/c/6ac26caf-b63c-83ec-83d0-9f8d926c3df7"

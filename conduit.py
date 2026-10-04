@@ -38,7 +38,16 @@ def load_workspaces(path: Path = CONFIG_PATH) -> dict[str, dict[str, str]]:
     return workspaces
 
 
+def load_job_path_prepend(path: Path = CONFIG_PATH) -> list[str]:
+    with path.open("rb") as config_file:
+        entries = tomllib.load(config_file).get("job_path_prepend", [])
+    if not isinstance(entries, list) or not all(isinstance(entry, str) for entry in entries):
+        raise ValueError("config.toml: job_path_prepend must be a list of strings")
+    return entries
+
+
 WORKSPACES = load_workspaces()
+JOB_PATH_PREPEND = load_job_path_prepend()
 
 PING = "LOCAL-AGENT PING"
 PONG = "LOCAL-AGENT PONG — Worker ready"
@@ -78,6 +87,30 @@ def load_dotenv(path: Path | None = None) -> None:
         key = key.strip()
         if separator and key in ENV_KEYS and key not in os.environ:
             os.environ[key] = value.strip()
+
+
+def build_job_env(job_tmp: Path) -> dict[str, str]:
+    env = os.environ.copy()
+    conduit_scripts = os.path.normcase(
+        os.path.normpath(str(Path(sys.prefix) / "Scripts"))
+    )
+    path_entries = []
+    prepended = set()
+    for entry in JOB_PATH_PREPEND:
+        normalized = os.path.normcase(os.path.normpath(entry))
+        if normalized not in prepended:
+            path_entries.append(entry)
+            prepended.add(normalized)
+    path_entries.extend(
+        entry for entry in env.get("PATH", "").split(os.pathsep)
+        if os.path.normcase(os.path.normpath(entry)) not in prepended
+        and os.path.normcase(os.path.normpath(entry)) != conduit_scripts
+    )
+    env["PATH"] = os.pathsep.join(path_entries)
+    for key in ("VIRTUAL_ENV", "PYTHONPATH", "PYTHONHOME"):
+        env.pop(key, None)
+    env["TMPDIR"] = str(job_tmp)
+    return env
 
 
 def error_message(job_id: object, exit_code: int, stderr: str) -> str:
@@ -120,14 +153,19 @@ def run_job(job: dict[str, str]) -> tuple[int, str, str]:
         return 127, "", "codex executable not found"
 
     output_path = ""
+    job_tmp = ""
     try:
+        workspace_path = Path(WORKSPACES[job["workspace"]]["path"]).resolve()
+        temp_root = workspace_path / ".conduit-tmp"
+        temp_root.mkdir(exist_ok=True)
+        job_tmp = tempfile.mkdtemp(prefix="job-", dir=temp_root)
         with tempfile.NamedTemporaryFile(delete=False, suffix=".txt") as output:
             output_path = output.name
         command = [
             codex,
             "exec",
             "-C",
-            WORKSPACES[job["workspace"]]["path"],
+            str(workspace_path),
             "-s",
             "workspace-write",
             "-o",
@@ -137,6 +175,7 @@ def run_job(job: dict[str, str]) -> tuple[int, str, str]:
         completed = subprocess.run(
             command,
             input=job["instruction"],
+            env=build_job_env(Path(job_tmp)),
             text=True,
             encoding="utf-8",
             errors="replace",
@@ -152,6 +191,8 @@ def run_job(job: dict[str, str]) -> tuple[int, str, str]:
     finally:
         if output_path:
             Path(output_path).unlink(missing_ok=True)
+        if job_tmp:
+            shutil.rmtree(job_tmp, ignore_errors=True)
 
 
 def handle_text(text: str) -> str:
