@@ -30,3 +30,6 @@ Job は逐次実行され、返信は元メッセージの thread に投稿さ�
 
 ChatGPT Web callbackには、Chromeをremote debugging port `9222`で起動し、ログイン済みの
 Chromeで固定callback先のチャットを1タブだけ開いておく必要があります。
+
+実行ログは標準出力と `logs/conduit.log` に出力されます。ログファイルは最大10MB、
+10世代保持です。

@@ -1,12 +1,15 @@
 """Minimal Slack-to-Codex worker for conduit v0.1."""
 
 import json
+import logging
 import os
 import re
 import shutil
 import subprocess
+import sys
 import tempfile
 import threading
+from logging.handlers import RotatingFileHandler
 from pathlib import Path
 
 from slack_bolt import App
@@ -28,6 +31,25 @@ CHATGPT_ATTRIBUTION = re.compile(
     r"\s+\*使用して送信されました\*\s+<@U[A-Z0-9]+>\s*\Z"
 )
 _job_lock = threading.Lock()
+logger = logging.getLogger("conduit")
+logger.addHandler(logging.NullHandler())
+
+
+def setup_logging(log_path: Path | None = None) -> None:
+    path = log_path or Path(__file__).with_name("logs") / "conduit.log"
+    path.parent.mkdir(parents=True, exist_ok=True)
+    formatter = logging.Formatter("%(asctime)s %(levelname)s %(message)s")
+    stream = logging.StreamHandler(sys.stdout)
+    file = RotatingFileHandler(
+        path, maxBytes=10 * 1024 * 1024, backupCount=10, encoding="utf-8"
+    )
+    stream.setFormatter(formatter)
+    file.setFormatter(formatter)
+    logger.handlers.clear()
+    logger.addHandler(stream)
+    logger.addHandler(file)
+    logger.setLevel(logging.INFO)
+    logger.propagate = False
 
 
 def load_dotenv(path: Path | None = None) -> None:
@@ -54,7 +76,7 @@ def callback_result(message: str) -> None:
     try:
         notify_chatgpt(message)
     except Exception as exc:
-        print(f"ChatGPT callback failed: {exc}")
+        logger.error("ChatGPT callback failed: %s", exc)
 
 
 def parse_job(text: str) -> dict[str, str]:
@@ -103,9 +125,11 @@ def run_job(job: dict[str, str]) -> tuple[int, str, str]:
             capture_output=True,
             check=False,
         )
+        logger.info("Codex stdout:\n%s", completed.stdout)
         final_message = Path(output_path).read_text(encoding="utf-8", errors="replace")
         return completed.returncode, final_message, completed.stderr
     except OSError as exc:
+        logger.error("Codex execution error job_id=%s error=%s", job["job_id"], exc)
         return 126, "", str(exc)
     finally:
         if output_path:
@@ -115,6 +139,7 @@ def run_job(job: dict[str, str]) -> tuple[int, str, str]:
 def handle_text(text: str) -> str:
     stripped = text.strip()
     if stripped == PING or stripped.startswith(f"{PING} *"):
+        logger.info("PING PONG")
         return PONG
 
     job_id: object = "(unknown)"
@@ -125,10 +150,19 @@ def handle_text(text: str) -> str:
         job = parse_job(text)
         job_id = job["job_id"]
     except (json.JSONDecodeError, ValueError) as exc:
+        logger.error("Job parse/validation error job_id=%s error=%s", job_id, exc)
         return error_message(job_id, 2, str(exc))
 
     with _job_lock:
+        logger.info("JOB START job_id=%s workspace=%s", job_id, job["workspace"])
         exit_code, final_message, stderr = run_job(job)
+        logger.info("JOB END job_id=%s exit_code=%s", job_id, exit_code)
+        if exit_code != 0:
+            stderr_tail = "\n".join(stderr.splitlines()[-20:]) or "(no stderr)"
+            logger.error(
+                "Codex execution error job_id=%s exit_code=%s stderr:\n%s",
+                job_id, exit_code, stderr_tail,
+            )
         if exit_code == 0 and final_message:
             result = final_message
         else:
@@ -140,9 +174,11 @@ def handle_text(text: str) -> str:
 
 
 def main() -> None:
+    setup_logging()
     load_dotenv()
     missing = [key for key in ENV_KEYS if not os.environ.get(key)]
     if missing:
+        logger.error("Missing required settings: %s", ", ".join(missing))
         raise SystemExit(f"Missing required settings: {', '.join(missing)}")
 
     app = App(token=os.environ["SLACK_BOT_TOKEN"])

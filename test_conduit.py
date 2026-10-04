@@ -37,7 +37,29 @@ class ConduitTests(unittest.TestCase):
                 self.assertEqual(os.environ["SLACK_BOT_TOKEN"], "from-os")
 
     def test_ping(self):
-        self.assertEqual(conduit.handle_text(conduit.PING), conduit.PONG)
+        with self.assertLogs(conduit.logger, level="INFO") as logs:
+            self.assertEqual(conduit.handle_text(conduit.PING), conduit.PONG)
+        self.assertIn("PING PONG", logs.output[0])
+
+    def test_logging_rotation_settings(self):
+        with tempfile.TemporaryDirectory(dir=".") as directory:
+            try:
+                conduit.setup_logging(Path(directory) / "conduit.log")
+                handler = next(
+                    item for item in conduit.logger.handlers
+                    if isinstance(item, conduit.RotatingFileHandler)
+                )
+                self.assertEqual(handler.maxBytes, 10 * 1024 * 1024)
+                self.assertEqual(handler.backupCount, 10)
+                self.assertTrue(any(
+                    type(item) is conduit.logging.StreamHandler
+                    for item in conduit.logger.handlers
+                ))
+            finally:
+                for handler in conduit.logger.handlers[:]:
+                    handler.close()
+                    conduit.logger.removeHandler(handler)
+                conduit.logger.addHandler(conduit.logging.NullHandler())
 
     def test_slack_attributed_ping(self):
         text = "LOCAL-AGENT PING *使用して送信されました* <@U0C4T02QR9A>"
@@ -59,12 +81,14 @@ class ConduitTests(unittest.TestCase):
                 self.assertIn("exit_code: 2", conduit.handle_text(job + " SOMETHING"))
 
     def test_unknown_workspace_is_rejected(self):
-        response = conduit.handle_text(json.dumps({
-            "job_id": "bad-1", "workspace": "unknown", "instruction": "test"
-        }))
+        with self.assertLogs(conduit.logger, level="ERROR") as logs:
+            response = conduit.handle_text(json.dumps({
+                "job_id": "bad-1", "workspace": "unknown", "instruction": "test"
+            }))
         self.assertIn("job_id: bad-1", response)
         self.assertIn("exit_code: 2", response)
         self.assertIn("unknown workspace", response)
+        self.assertIn("Job parse/validation error", logs.output[0])
 
     def test_extra_field_is_rejected(self):
         with tempfile.TemporaryDirectory(dir=".") as workspace:
@@ -80,10 +104,13 @@ class ConduitTests(unittest.TestCase):
             with patch.dict(conduit.WORKSPACES, {"test": workspace}), patch.object(
                 conduit, "run_job", return_value=(0, "done", "diagnostic")
             ):
-                response = conduit.handle_text(json.dumps({
-                    "job_id": "ok-1", "workspace": "test", "instruction": "test"
-                }))
+                with self.assertLogs(conduit.logger, level="INFO") as logs:
+                    response = conduit.handle_text(json.dumps({
+                        "job_id": "ok-1", "workspace": "test", "instruction": "test"
+                    }))
         self.assertEqual(response, "done")
+        self.assertTrue(any("JOB START job_id=ok-1 workspace=test" in line for line in logs.output))
+        self.assertTrue(any("JOB END job_id=ok-1 exit_code=0" in line for line in logs.output))
         self.notify.assert_called_once_with("done")
 
     def test_failure_limits_stderr_to_twenty_lines(self):
@@ -105,14 +132,14 @@ class ConduitTests(unittest.TestCase):
         with tempfile.TemporaryDirectory(dir=".") as workspace:
             with patch.dict(conduit.WORKSPACES, {"test": workspace}), patch.object(
                 conduit, "run_job", return_value=(0, "done", "")
-            ) as run_job, patch("builtins.print") as output:
+            ) as run_job, self.assertLogs(conduit.logger, level="ERROR") as logs:
                 response = conduit.handle_text(json.dumps({
                     "job_id": "ok-3", "workspace": "test", "instruction": "test"
                 }))
         self.assertEqual(response, "done")
         run_job.assert_called_once()
         self.notify.assert_called_once_with("done")
-        output.assert_called_once()
+        self.assertTrue(any("ChatGPT callback failed" in line for line in logs.output))
 
     def test_run_job_passes_instruction_on_stdin(self):
         def fake_run(command, **kwargs):
@@ -122,15 +149,19 @@ class ConduitTests(unittest.TestCase):
             self.assertEqual(kwargs["input"], "日本語 instruction")
             self.assertEqual(kwargs["encoding"], "utf-8")
             self.assertEqual(kwargs["errors"], "replace")
-            return type("Result", (), {"returncode": 0, "stderr": ""})()
+            return type(
+                "Result", (), {"returncode": 0, "stdout": "codex details", "stderr": ""}
+            )()
 
         with tempfile.TemporaryDirectory(dir=".") as workspace:
             job = {"job_id": "ok-2", "workspace": "test", "instruction": "日本語 instruction"}
             with patch.dict(conduit.WORKSPACES, {"test": workspace}), patch(
                 "conduit.shutil.which", return_value=r"C:\bin\codex.cmd"
             ), patch("conduit.subprocess.run", side_effect=fake_run):
-                result = conduit.run_job(job)
+                with self.assertLogs(conduit.logger, level="INFO") as logs:
+                    result = conduit.run_job(job)
         self.assertEqual(result, (0, "final", ""))
+        self.assertTrue(any("Codex stdout:\ncodex details" in line for line in logs.output))
 
 
 if __name__ == "__main__":
