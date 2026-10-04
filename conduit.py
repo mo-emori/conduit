@@ -1,5 +1,7 @@
 """Minimal Slack-to-Codex worker for conduit v0.2."""
 
+import base64
+import binascii
 import json
 import logging
 import os
@@ -137,8 +139,21 @@ def parse_job(text: str) -> dict[str, str]:
 
     if not isinstance(job, dict) or set(job) != JOB_FIELDS:
         raise ValueError("Job must contain exactly: job_id, workspace, instruction")
-    if not all(isinstance(job[field], str) and job[field] for field in JOB_FIELDS):
+    if not all(isinstance(job[field], str) for field in JOB_FIELDS):
         raise ValueError("all Job fields must be non-empty strings")
+    if not job["job_id"] or not job["workspace"]:
+        raise ValueError("all Job fields must be non-empty strings")
+    try:
+        instruction_bytes = base64.b64decode(job["instruction"], validate=True)
+    except (binascii.Error, ValueError) as exc:
+        raise ValueError("INVALID_INSTRUCTION_BASE64") from exc
+    try:
+        instruction = instruction_bytes.decode("utf-8", errors="strict")
+    except UnicodeDecodeError as exc:
+        raise ValueError("INSTRUCTION_NOT_UTF8") from exc
+    if not instruction.strip():
+        raise ValueError("instruction must be non-empty after decoding")
+    job["instruction"] = instruction
     if job["workspace"] not in WORKSPACES:
         raise ValueError(f"unknown workspace: {job['workspace']}")
     workspace_path = WORKSPACES[job["workspace"]]["path"]

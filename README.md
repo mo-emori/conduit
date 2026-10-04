@@ -33,12 +33,26 @@ Slack App では Socket Mode を有効にし、`app_token` に `connections:writ
 
 疎通確認は `LOCAL-AGENT PING`、Job は次の JSON を1メッセージで送信します。
 
-```json
-{
-  "job_id": "example-001",
-  "workspace": "kairos",
-  "instruction": "README.mdを確認し、プロジェクト構成を要約してください。ファイルは変更しないでください。"
+`instruction` はUTF-8でエンコードしてからBase64化したASCII文字列として送信します。
+
+```python
+import base64
+import json
+
+instruction = r"""
+Windows path:
+C:\dev\kairos
+"""
+
+job = {
+    "job_id": "example-001",
+    "workspace": "kairos",
+    "instruction": base64.b64encode(
+        instruction.encode("utf-8")
+    ).decode("ascii"),
 }
+
+message = json.dumps(job, ensure_ascii=False)
 ```
 
 Job は逐次実行され、返信は元メッセージの thread に投稿されます。
