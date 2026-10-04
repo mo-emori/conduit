@@ -1,6 +1,6 @@
 # conduit
 
-Slack から Job を受け取り、指定 workspace で Codex CLI を実行する v0.1 の最小 Worker です。
+Slack から Job を受け取り、指定 workspace で Codex CLI を実行する v0.2 の最小 Worker です。
 
 ## セットアップと実行
 
@@ -8,6 +8,21 @@ Slack から Job を受け取り、指定 workspace で Codex CLI を実行す�
 .venv\Scripts\python.exe -m pip install -r requirements.txt
 python conduit.py
 ```
+
+`config.toml` は workspace ごとのローカルパスと ChatGPT Web callback 先を管理します。
+workspace を追加するときは `path` と `callback_url` の2項目だけを設定してください。
+
+```toml
+[workspaces.conduit]
+path = "C:\\dev\\conduit"
+callback_url = "https://chatgpt.com/c/6ac26caf-b63c-83ec-83d0-9f8d926c3df7"
+
+[workspaces.kairos]
+path = "C:\\dev\\kairos"
+callback_url = "https://chatgpt.com/c/6ac26c6e-9710-83ee-b641-9f17d64cd7a9"
+```
+
+`.env` は従来どおり Slack の secret / local settings 専用です。
 
 起動前にrepository rootの `.env` へ `SLACK_BOT_TOKEN`、`SLACK_APP_TOKEN`、
 `SLACK_CHANNEL_ID` を設定してください。`.env` は秘密値を含むためGitへcommitしません。
@@ -29,7 +44,7 @@ Slack App では Socket Mode を有効にし、`app_token` に `connections:writ
 Job は逐次実行され、返信は元メッセージの thread に投稿されます。
 
 ChatGPT Web callbackには、Chromeをremote debugging port `9222`で起動し、ログイン済みの
-Chromeで固定callback先のチャットを1タブだけ開いておく必要があります。
+ChromeでJobのworkspaceに設定したcallback先のチャットを1タブだけ開いておく必要があります。
 
 実行ログは標準出力と `logs/conduit.log` に出力されます。ログファイルは最大10MB、
 10世代保持です。

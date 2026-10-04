@@ -5,7 +5,6 @@ import time
 from playwright.sync_api import sync_playwright
 
 
-CALLBACK_URL = "https://chatgpt.com/c/6ac26caf-b63c-83ec-83d0-9f8d926c3df7"
 CDP_URL = "http://127.0.0.1:9222"
 READY_TIMEOUT_SECONDS = 120
 COMPOSER_SELECTORS = (
@@ -30,14 +29,14 @@ def _visible(page, selectors):
     return None
 
 
-def notify_chatgpt(message: str) -> None:
+def notify_chatgpt(target_url: str, message: str) -> None:
     with sync_playwright() as playwright:
         browser = playwright.chromium.connect_over_cdp(CDP_URL)
         pages = [
             page
             for context in browser.contexts
             for page in context.pages
-            if page.url.rstrip("/") == CALLBACK_URL.rstrip("/")
+            if page.url.rstrip("/") == target_url.rstrip("/")
         ]
         if len(pages) != 1:
             raise RuntimeError(f"target chat count: {len(pages)}")

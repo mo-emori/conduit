@@ -1,0 +1,7 @@
+[workspaces.conduit]
+path = "C:\\dev\\conduit"
+callback_url = "https://chatgpt.com/c/6ac26caf-b63c-83ec-83d0-9f8d926c3df7"
+
+[workspaces.kairos]
+path = "C:\\dev\\kairos"
+callback_url = "https://chatgpt.com/c/6ac26c6e-9710-83ee-b641-9f17d64cd7a9"

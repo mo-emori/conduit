@@ -85,6 +85,25 @@ v0.1の開発期間は最大3日とする。
 
 > **実際に発生した問題だけ直す。**
 
+## 3.3 v0.1 非目的
+
+実装しないもの:
+
+自動売買、Broker API、Selection / Screening、Universe / Candidate Pool、EDINET client、独自Web Provider、portfolio update command、watch command、独自Scheduler、raw data cache・再利用判定、Database、Dashboard、Tray UI、Server / VPS、分散Agent、Message Queue、Bootstrap Orchestrator、Runtime Identity、Environment Binding、Runner lifecycle state machine、Durable Stage、自動Recovery、Backup / Restore機構、Storage identity / marker検証、Storage容量監視、Storage縮退制御、Service Registry、Paid Service Governance、Budget reservation、多階層Budget Gate、Decision Queue、User Status / BUSY Lease、Alert / Incident / Notification state machine、Notification Window、Break B1?B4、CV / RV体系、Contract文書群、validation package、trust baseline / candidate / promotion、authority reconciliation、capability closure、review ceremony、models.py。
+
+さらに、投資判断検証のための以下の機構も実装しない。
+
+- Backtest system
+- PIT Historical Data基盤
+- Historical Replay framework
+- Paper Trading system
+- Virtual Portfolio
+- 仮想Order / Execution管理
+- Performance tracking機構
+- 価格追跡Job
+
+検証のために別の大規模システムを作らない。
+
 ---
 
 # 4. 旧システムとの関係

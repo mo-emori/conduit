@@ -1,4 +1,4 @@
-"""Minimal Slack-to-Codex worker for conduit v0.1."""
+"""Minimal Slack-to-Codex worker for conduit v0.2."""
 
 import json
 import logging
@@ -9,6 +9,7 @@ import subprocess
 import sys
 import tempfile
 import threading
+import tomllib
 from logging.handlers import RotatingFileHandler
 from pathlib import Path
 
@@ -18,10 +19,26 @@ from slack_bolt.adapter.socket_mode import SocketModeHandler
 from callback import notify_chatgpt
 
 
-WORKSPACES = {
-    "kairos": r"C:\dev\kairos",
-    "conduit": r"C:\dev\conduit",
-}
+CONFIG_PATH = Path(__file__).with_name("config.toml")
+
+
+def load_workspaces(path: Path = CONFIG_PATH) -> dict[str, dict[str, str]]:
+    if not path.is_file():
+        raise ValueError(f"config.toml not found: {path}")
+    with path.open("rb") as config_file:
+        config = tomllib.load(config_file)
+    workspaces = config.get("workspaces", {})
+    if not isinstance(workspaces, dict):
+        raise ValueError("config.toml: workspaces must be a table")
+    for name, workspace in workspaces.items():
+        if not isinstance(workspace, dict) or not workspace.get("path"):
+            raise ValueError(f"config.toml: workspace '{name}' has no path")
+        if not workspace.get("callback_url"):
+            raise ValueError(f"config.toml: workspace '{name}' has no callback_url")
+    return workspaces
+
+
+WORKSPACES = load_workspaces()
 
 PING = "LOCAL-AGENT PING"
 PONG = "LOCAL-AGENT PONG — Worker ready"
@@ -72,9 +89,9 @@ def remove_chatgpt_attribution(text: str) -> str:
     return CHATGPT_ATTRIBUTION.sub("", text)
 
 
-def callback_result(message: str) -> None:
+def callback_result(target_url: str, message: str) -> None:
     try:
-        notify_chatgpt(message)
+        notify_chatgpt(target_url, message)
     except Exception as exc:
         logger.error("ChatGPT callback failed: %s", exc)
 
@@ -91,8 +108,9 @@ def parse_job(text: str) -> dict[str, str]:
         raise ValueError("all Job fields must be non-empty strings")
     if job["workspace"] not in WORKSPACES:
         raise ValueError(f"unknown workspace: {job['workspace']}")
-    if not Path(WORKSPACES[job["workspace"]]).is_dir():
-        raise ValueError(f"workspace does not exist: {WORKSPACES[job['workspace']]}")
+    workspace_path = WORKSPACES[job["workspace"]]["path"]
+    if not Path(workspace_path).is_dir():
+        raise ValueError(f"workspace does not exist: {workspace_path}")
     return job
 
 
@@ -109,7 +127,7 @@ def run_job(job: dict[str, str]) -> tuple[int, str, str]:
             codex,
             "exec",
             "-C",
-            WORKSPACES[job["workspace"]],
+            WORKSPACES[job["workspace"]]["path"],
             "-s",
             "workspace-write",
             "-o",
@@ -169,7 +187,7 @@ def handle_text(text: str) -> str:
             if exit_code == 0:
                 exit_code, stderr = 1, stderr or "Codex produced no final message"
             result = error_message(job_id, exit_code, stderr)
-        callback_result(result)
+        callback_result(WORKSPACES[job["workspace"]]["callback_url"], result)
     return result
 
 
