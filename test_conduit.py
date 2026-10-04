@@ -1,4 +1,5 @@
 import json
+import os
 import tempfile
 import unittest
 from pathlib import Path
@@ -12,6 +13,28 @@ class ConduitTests(unittest.TestCase):
         notify_patcher = patch("conduit.notify_chatgpt")
         self.notify = notify_patcher.start()
         self.addCleanup(notify_patcher.stop)
+
+    def test_load_dotenv(self):
+        with tempfile.TemporaryDirectory(dir=".") as directory:
+            env_file = Path(directory) / ".env"
+            env_file.write_text(
+                "SLACK_BOT_TOKEN=from-file\nSLACK_APP_TOKEN=app-file\n"
+                "SLACK_CHANNEL_ID=channel-file\n",
+                encoding="utf-8",
+            )
+            with patch.dict(os.environ, {}, clear=True):
+                conduit.load_dotenv(env_file)
+                self.assertEqual(os.environ["SLACK_BOT_TOKEN"], "from-file")
+                self.assertEqual(os.environ["SLACK_APP_TOKEN"], "app-file")
+                self.assertEqual(os.environ["SLACK_CHANNEL_ID"], "channel-file")
+
+    def test_load_dotenv_does_not_override_environment(self):
+        with tempfile.TemporaryDirectory(dir=".") as directory:
+            env_file = Path(directory) / ".env"
+            env_file.write_text("SLACK_BOT_TOKEN=from-file\n", encoding="utf-8")
+            with patch.dict(os.environ, {"SLACK_BOT_TOKEN": "from-os"}, clear=True):
+                conduit.load_dotenv(env_file)
+                self.assertEqual(os.environ["SLACK_BOT_TOKEN"], "from-os")
 
     def test_ping(self):
         self.assertEqual(conduit.handle_text(conduit.PING), conduit.PONG)

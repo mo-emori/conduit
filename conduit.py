@@ -23,10 +23,22 @@ WORKSPACES = {
 PING = "LOCAL-AGENT PING"
 PONG = "LOCAL-AGENT PONG — Worker ready"
 JOB_FIELDS = {"job_id", "workspace", "instruction"}
+ENV_KEYS = ("SLACK_BOT_TOKEN", "SLACK_APP_TOKEN", "SLACK_CHANNEL_ID")
 CHATGPT_ATTRIBUTION = re.compile(
     r"\s+\*使用して送信されました\*\s+<@U[A-Z0-9]+>\s*\Z"
 )
 _job_lock = threading.Lock()
+
+
+def load_dotenv(path: Path | None = None) -> None:
+    env_path = path or Path(__file__).with_name(".env")
+    if not env_path.is_file():
+        return
+    for line in env_path.read_text(encoding="utf-8").splitlines():
+        key, separator, value = line.partition("=")
+        key = key.strip()
+        if separator and key in ENV_KEYS and key not in os.environ:
+            os.environ[key] = value.strip()
 
 
 def error_message(job_id: object, exit_code: int, stderr: str) -> str:
@@ -128,6 +140,11 @@ def handle_text(text: str) -> str:
 
 
 def main() -> None:
+    load_dotenv()
+    missing = [key for key in ENV_KEYS if not os.environ.get(key)]
+    if missing:
+        raise SystemExit(f"Missing required settings: {', '.join(missing)}")
+
     app = App(token=os.environ["SLACK_BOT_TOKEN"])
     channel_id = os.environ["SLACK_CHANNEL_ID"]
 

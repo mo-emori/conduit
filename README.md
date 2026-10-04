@@ -6,11 +6,11 @@ Slack から Job を受け取り、指定 workspace で Codex CLI を実行す�
 
 ```powershell
 .venv\Scripts\python.exe -m pip install -r requirements.txt
-$env:SLACK_BOT_TOKEN = "xoxb-..."
-$env:SLACK_APP_TOKEN = "xapp-..."
-$env:SLACK_CHANNEL_ID = "C0123456789" # #codex-jobs の channel ID
-.venv\Scripts\python.exe conduit.py
+python conduit.py
 ```
+
+起動前にrepository rootの `.env` へ `SLACK_BOT_TOKEN`、`SLACK_APP_TOKEN`、
+`SLACK_CHANNEL_ID` を設定してください。`.env` は秘密値を含むためGitへcommitしません。
 
 Slack App では Socket Mode を有効にし、`app_token` に `connections:write`、Bot に
 `channels:history`、`chat:write`（private channel なら `groups:history` も）を付与して、
