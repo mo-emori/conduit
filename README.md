@@ -33,7 +33,7 @@ Slack App では Socket Mode を有効にし、`app_token` に `connections:writ
 
 疎通確認は `LOCAL-AGENT PING`、Job は次の JSON を1メッセージで送信します。
 
-`instruction` はUTF-8でエンコードしてからBase64化したASCII文字列として送信します。
+`instruction_base64` はUTF-8でエンコードしてからBase64化したASCII文字列として送信します。
 
 ```python
 import base64
@@ -47,7 +47,7 @@ C:\dev\kairos
 job = {
     "job_id": "example-001",
     "workspace": "kairos",
-    "instruction": base64.b64encode(
+    "instruction_base64": base64.b64encode(
         instruction.encode("utf-8")
     ).decode("ascii"),
 }

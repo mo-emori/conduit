@@ -141,9 +141,23 @@ https://example.com/a?x=1&y=2
                 job = conduit.parse_job(json.dumps({
                     "job_id": "round-trip",
                     "workspace": "test",
-                    "instruction": self.encode_instruction(instruction),
+                    "instruction_base64": self.encode_instruction(instruction),
                 }))
         self.assertEqual(job["instruction"], instruction)
+        self.assertNotIn("instruction_base64", job)
+
+    def test_old_instruction_field_is_rejected(self):
+        with tempfile.TemporaryDirectory(dir=".") as workspace, patch.dict(
+            conduit.WORKSPACES,
+            {"test": self.workspace_config(workspace)},
+            clear=True,
+        ):
+            with self.assertRaisesRegex(ValueError, "instruction_base64"):
+                conduit.parse_job(json.dumps({
+                    "job_id": "old-format",
+                    "workspace": "test",
+                    "instruction": "plain text",
+                }))
 
     def test_invalid_instruction_base64_is_rejected(self):
         with tempfile.TemporaryDirectory(dir=".") as workspace, patch.dict(
@@ -155,7 +169,7 @@ https://example.com/a?x=1&y=2
                 conduit.parse_job(json.dumps({
                     "job_id": "bad-base64",
                     "workspace": "test",
-                    "instruction": "not base64!",
+                    "instruction_base64": "not base64!",
                 }))
 
     def test_non_utf8_instruction_is_rejected(self):
@@ -169,7 +183,7 @@ https://example.com/a?x=1&y=2
                 conduit.parse_job(json.dumps({
                     "job_id": "bad-utf8",
                     "workspace": "test",
-                    "instruction": encoded,
+                    "instruction_base64": encoded,
                 }))
 
     def test_empty_decoded_instruction_is_rejected(self):
@@ -185,7 +199,7 @@ https://example.com/a?x=1&y=2
                     conduit.parse_job(json.dumps({
                         "job_id": "empty",
                         "workspace": "test",
-                        "instruction": self.encode_instruction(instruction),
+                        "instruction_base64": self.encode_instruction(instruction),
                     }))
 
     def test_logging_rotation_settings(self):
@@ -217,7 +231,7 @@ https://example.com/a?x=1&y=2
     def test_slack_attributed_job_only_removes_known_suffix(self):
         job = json.dumps({
             "job_id": "conduit-e2e-001", "workspace": "test",
-            "instruction": self.encode_instruction("test")
+            "instruction_base64": self.encode_instruction("test")
         })
         attribution = "\n*使用して送信されました* <@U0C4T02QR9A>"
         with tempfile.TemporaryDirectory(dir=".") as workspace:
@@ -232,7 +246,7 @@ https://example.com/a?x=1&y=2
         with self.assertLogs(conduit.logger, level="ERROR") as logs:
             response = conduit.handle_text(json.dumps({
                 "job_id": "bad-1", "workspace": "unknown",
-                "instruction": self.encode_instruction("test")
+                "instruction_base64": self.encode_instruction("test")
             }))
         self.assertIn("job_id: bad-1", response)
         self.assertIn("exit_code: 2", response)
@@ -244,7 +258,7 @@ https://example.com/a?x=1&y=2
             with patch.dict(conduit.WORKSPACES, {"test": self.workspace_config(workspace)}):
                 response = conduit.handle_text(json.dumps({
                     "job_id": "bad-2", "workspace": "test",
-                    "instruction": self.encode_instruction("test"), "extra": True,
+                    "instruction_base64": self.encode_instruction("test"), "extra": True,
                 }))
         self.assertIn("exit_code: 2", response)
 
@@ -256,7 +270,7 @@ https://example.com/a?x=1&y=2
                 with self.assertLogs(conduit.logger, level="INFO") as logs:
                     response = conduit.handle_text(json.dumps({
                         "job_id": "ok-1", "workspace": "test",
-                        "instruction": self.encode_instruction("test")
+                        "instruction_base64": self.encode_instruction("test")
                     }))
         self.assertEqual(response, "done")
         self.assertTrue(any("JOB START job_id=ok-1 workspace=test" in line for line in logs.output))
@@ -273,7 +287,7 @@ https://example.com/a?x=1&y=2
                 conduit.handle_text(json.dumps({
                     "job_id": "kairos-1",
                     "workspace": "kairos",
-                    "instruction": self.encode_instruction("test"),
+                    "instruction_base64": self.encode_instruction("test"),
                 }))
         self.notify.assert_called_once_with(kairos_url, "kairos result")
 
@@ -285,7 +299,7 @@ https://example.com/a?x=1&y=2
             ):
                 response = conduit.handle_text(json.dumps({
                     "job_id": "fail-1", "workspace": "test",
-                    "instruction": self.encode_instruction("test")
+                    "instruction_base64": self.encode_instruction("test")
                 }))
         self.assertNotIn("line 4\n", response)
         self.assertIn("line 5\n", response)
@@ -300,7 +314,7 @@ https://example.com/a?x=1&y=2
             ) as run_job, self.assertLogs(conduit.logger, level="ERROR") as logs:
                 response = conduit.handle_text(json.dumps({
                     "job_id": "ok-3", "workspace": "test",
-                    "instruction": self.encode_instruction("test")
+                    "instruction_base64": self.encode_instruction("test")
                 }))
         self.assertEqual(response, "done")
         run_job.assert_called_once()
@@ -342,7 +356,7 @@ https://example.com/a?x=1&y=2
                 job = conduit.parse_job(json.dumps({
                     "job_id": "ok-2",
                     "workspace": "test",
-                    "instruction": self.encode_instruction("日本語 instruction"),
+                    "instruction_base64": self.encode_instruction("日本語 instruction"),
                 }))
                 with self.assertLogs(conduit.logger, level="INFO") as logs:
                     result = conduit.run_job(job)

@@ -53,7 +53,7 @@ JOB_PATH_PREPEND = load_job_path_prepend()
 
 PING = "LOCAL-AGENT PING"
 PONG = "LOCAL-AGENT PONG — Worker ready"
-JOB_FIELDS = {"job_id", "workspace", "instruction"}
+JOB_FIELDS = {"job_id", "workspace", "instruction_base64"}
 ENV_KEYS = ("SLACK_BOT_TOKEN", "SLACK_APP_TOKEN", "SLACK_CHANNEL_ID")
 CHATGPT_ATTRIBUTION = re.compile(
     r"\s+\*使用して送信されました\*\s+<@U[A-Z0-9]+>\s*\Z"
@@ -138,13 +138,17 @@ def parse_job(text: str) -> dict[str, str]:
         raise ValueError(f"invalid Job JSON: {exc.msg}") from exc
 
     if not isinstance(job, dict) or set(job) != JOB_FIELDS:
-        raise ValueError("Job must contain exactly: job_id, workspace, instruction")
+        raise ValueError(
+            "Job must contain exactly: job_id, workspace, instruction_base64"
+        )
     if not all(isinstance(job[field], str) for field in JOB_FIELDS):
         raise ValueError("all Job fields must be non-empty strings")
     if not job["job_id"] or not job["workspace"]:
         raise ValueError("all Job fields must be non-empty strings")
     try:
-        instruction_bytes = base64.b64decode(job["instruction"], validate=True)
+        instruction_bytes = base64.b64decode(
+            job["instruction_base64"], validate=True
+        )
     except (binascii.Error, ValueError) as exc:
         raise ValueError("INVALID_INSTRUCTION_BASE64") from exc
     try:
@@ -153,6 +157,7 @@ def parse_job(text: str) -> dict[str, str]:
         raise ValueError("INSTRUCTION_NOT_UTF8") from exc
     if not instruction.strip():
         raise ValueError("instruction must be non-empty after decoding")
+    del job["instruction_base64"]
     job["instruction"] = instruction
     if job["workspace"] not in WORKSPACES:
         raise ValueError(f"unknown workspace: {job['workspace']}")
