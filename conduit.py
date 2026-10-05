@@ -135,35 +135,32 @@ def parse_job(text: str) -> dict[str, str]:
     try:
         job = json.loads(text)
     except json.JSONDecodeError as exc:
-        raise ValueError(f"invalid Job JSON: {exc.msg}") from exc
-
+        raise ValueError("invalid JSON") from exc
     if not isinstance(job, dict) or set(job) != JOB_FIELDS:
-        raise ValueError(
-            "Job must contain exactly: job_id, workspace, instruction_base64"
-        )
+        raise ValueError("invalid fields")
     if not all(isinstance(job[field], str) for field in JOB_FIELDS):
-        raise ValueError("all Job fields must be non-empty strings")
+        raise ValueError("invalid fields")
     if not job["job_id"] or not job["workspace"]:
-        raise ValueError("all Job fields must be non-empty strings")
+        raise ValueError("invalid fields")
     try:
         instruction_bytes = base64.b64decode(
             job["instruction_base64"], validate=True
         )
     except (binascii.Error, ValueError) as exc:
-        raise ValueError("INVALID_INSTRUCTION_BASE64") from exc
+        raise ValueError("invalid instruction Base64") from exc
     try:
         instruction = instruction_bytes.decode("utf-8", errors="strict")
     except UnicodeDecodeError as exc:
-        raise ValueError("INSTRUCTION_NOT_UTF8") from exc
+        raise ValueError("invalid instruction UTF-8") from exc
     if not instruction.strip():
-        raise ValueError("instruction must be non-empty after decoding")
-    del job["instruction_base64"]
-    job["instruction"] = instruction
+        raise ValueError("empty instruction")
     if job["workspace"] not in WORKSPACES:
-        raise ValueError(f"unknown workspace: {job['workspace']}")
+        raise ValueError("unknown workspace")
     workspace_path = WORKSPACES[job["workspace"]]["path"]
     if not Path(workspace_path).is_dir():
         raise ValueError(f"workspace does not exist: {workspace_path}")
+    del job["instruction_base64"]
+    job["instruction"] = instruction
     return job
 
 
@@ -192,19 +189,44 @@ def run_job(job: dict[str, str]) -> tuple[int, str, str]:
             output_path,
             "-",
         ]
-        completed = subprocess.run(
+        process = subprocess.Popen(
             command,
-            input=job["instruction"],
+            stdin=subprocess.PIPE,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
             env=build_job_env(Path(job_tmp)),
             text=True,
             encoding="utf-8",
             errors="replace",
-            capture_output=True,
-            check=False,
         )
-        logger.info("Codex stdout:\n%s", completed.stdout)
+        if process.stdin is None or process.stdout is None or process.stderr is None:
+            raise OSError("failed to open Codex process pipes")
+
+        stderr_lines = []
+
+        def read_stderr() -> None:
+            try:
+                for line in iter(process.stderr.readline, ""):
+                    stderr_lines.append(line)
+                    logged_line = line.rstrip("\r\n")
+                    if logged_line:
+                        logger.info("Codex stderr: %s", logged_line)
+            finally:
+                process.stderr.close()
+
+        stderr_thread = threading.Thread(target=read_stderr, daemon=True)
+        stderr_thread.start()
+        process.stdin.write(job["instruction"])
+        process.stdin.close()
+        for line in process.stdout:
+            line = line.rstrip("\r\n")
+            if line:
+                logger.info("Codex stdout: %s", line)
+        exit_code = process.wait()
+        stderr_thread.join()
+        stderr = "".join(stderr_lines)
         final_message = Path(output_path).read_text(encoding="utf-8", errors="replace")
-        return completed.returncode, final_message, completed.stderr
+        return exit_code, final_message, stderr
     except OSError as exc:
         logger.error("Codex execution error job_id=%s error=%s", job["job_id"], exc)
         return 126, "", str(exc)
@@ -221,16 +243,12 @@ def handle_text(text: str) -> str:
         logger.info("PING PONG")
         return PONG
 
-    job_id: object = "(unknown)"
     try:
-        decoded = json.loads(text)
-        if isinstance(decoded, dict):
-            job_id = decoded.get("job_id", job_id)
         job = parse_job(text)
         job_id = job["job_id"]
-    except (json.JSONDecodeError, ValueError) as exc:
-        logger.error("Job parse/validation error job_id=%s error=%s", job_id, exc)
-        return error_message(job_id, 2, str(exc))
+    except ValueError as exc:
+        logger.error("Job parse/validation error: %s", exc)
+        return f"INVALID_JOB: {exc}"
 
     with _job_lock:
         logger.info("JOB START job_id=%s workspace=%s", job_id, job["workspace"])
