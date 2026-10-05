@@ -1,5 +1,29 @@
 # conduit
 
+v0.3 adds an explicit Google Drive upload operation while preserving the v0.2 Codex Job contract.
+
+Configure the existing `My Drive/chatgpt/jobs` folder ID and external OAuth files in `config.toml`:
+
+```toml
+[drive]
+jobs_folder_id = "REPLACE_WITH_GOOGLE_DRIVE_JOBS_FOLDER_ID"
+credentials_file = "C:/Users/mttge/AppData/Roaming/conduit/credentials.json"
+token_file = "C:/Users/mttge/AppData/Roaming/conduit/token.json"
+```
+
+An upload message is a separate strict JSON object:
+
+```json
+{
+  "operation": "upload",
+  "job_id": "example-001",
+  "workspace": "kairos",
+  "paths": ["main.py", "tests/test_llm.py"]
+}
+```
+
+As with Codex Jobs, the sender must JSON-serialize and Slack-send this object in one programmatic tool execution; do not compose escaped JSON manually.
+
 Slack から Job を受け取り、指定 workspace で Codex CLI を実行する v0.2 の最小 Worker です。
 
 ## セットアップと実行

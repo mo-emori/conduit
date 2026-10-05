@@ -4,9 +4,10 @@ import os
 import tempfile
 import unittest
 from pathlib import Path
-from unittest.mock import patch
+from unittest.mock import MagicMock, patch
 
 import conduit
+import drive_store
 
 
 class ConduitTests(unittest.TestCase):
@@ -27,6 +28,15 @@ class ConduitTests(unittest.TestCase):
             "instruction_base64": base64.b64encode(
                 instruction.encode("utf-8")
             ).decode("ascii"),
+        })
+
+    @staticmethod
+    def make_upload(paths=None, job_id="upload-job", workspace="test"):
+        return json.dumps({
+            "operation": "upload",
+            "job_id": job_id,
+            "workspace": workspace,
+            "paths": paths if paths is not None else ["one.txt"],
         })
 
     def test_workspace_and_callback_resolution(self):
@@ -248,6 +258,165 @@ multiple lines
                 }))
         self.assertEqual(response, "INVALID_JOB: invalid fields")
         run_job.assert_not_called()
+
+    def test_upload_schema_valid_and_job_schema_stays_strict(self):
+        with tempfile.TemporaryDirectory(dir=".") as workspace, patch.dict(
+            conduit.WORKSPACES,
+            {"test": self.workspace_config(workspace)},
+            clear=True,
+        ):
+            upload = conduit.parse_upload(json.loads(self.make_upload()))
+            self.assertEqual(upload["operation"], "upload")
+            with self.assertRaisesRegex(ValueError, "invalid fields"):
+                conduit.parse_job_object(json.loads(self.make_job()) | {"operation": "upload"})
+
+    def test_upload_path_list_rules(self):
+        with tempfile.TemporaryDirectory(dir=".") as workspace, patch.dict(
+            conduit.WORKSPACES,
+            {"test": self.workspace_config(workspace)},
+            clear=True,
+        ):
+            for paths, error in (
+                ([], "invalid paths"),
+                (["a", "a"], "duplicate paths"),
+                ([r"tests\test_one.py"], "backslash path"),
+            ):
+                with self.subTest(paths=paths), self.assertRaisesRegex(ValueError, error):
+                    conduit.parse_upload(json.loads(self.make_upload(paths)))
+
+    def test_operation_dispatch_rejects_upload_without_running_codex(self):
+        with patch("conduit.run_job") as run_job:
+            result = conduit.handle_text(json.dumps({
+                "operation": "download",
+                "job_id": "job-1",
+                "workspace": "test",
+                "paths": ["one.txt"],
+            }))
+        self.assertEqual(result, "UPLOAD_ERROR: invalid fields")
+        run_job.assert_not_called()
+
+    def test_upload_path_prevalidation_rejects_unsafe_and_non_files(self):
+        with tempfile.TemporaryDirectory(dir=".") as workspace, tempfile.TemporaryDirectory(
+            dir="."
+        ) as outside:
+            root = Path(workspace)
+            (root / "directory").mkdir()
+            (Path(outside) / "outside.txt").write_text("outside", encoding="utf-8")
+            cases = [
+                (str((root / "absolute.txt").resolve()), "invalid path"),
+                ("../outside.txt", "invalid path"),
+                ("missing.txt", "missing path"),
+                ("directory", "not a file"),
+            ]
+            for relative, error in cases:
+                with self.subTest(path=relative), self.assertRaisesRegex(ValueError, error):
+                    conduit.validate_upload_paths(str(root), [relative])
+
+            link = root / "escape.txt"
+            try:
+                link.symlink_to(Path(outside) / "outside.txt")
+            except OSError:
+                pass
+            else:
+                with self.assertRaisesRegex(ValueError, "path outside workspace"):
+                    conduit.validate_upload_paths(str(root), ["escape.txt"])
+
+    def test_all_paths_validate_before_drive_side_effect(self):
+        with tempfile.TemporaryDirectory(dir=".") as workspace:
+            root = Path(workspace)
+            (root / "valid.txt").write_text("ok", encoding="utf-8")
+            with patch.dict(
+                conduit.WORKSPACES,
+                {"test": self.workspace_config(workspace)},
+                clear=True,
+            ), patch("conduit.load_drive_config") as load_config, patch(
+                "conduit.upload_files"
+            ) as upload:
+                result = conduit.handle_text(self.make_upload(["valid.txt", "missing.txt"]))
+            self.assertIn("missing path: missing.txt", result)
+            load_config.assert_not_called()
+            upload.assert_not_called()
+
+    @staticmethod
+    def fake_drive(existing=None, folder=None):
+        service = MagicMock()
+        files = service.files.return_value
+        list_request = MagicMock()
+        list_request.execute.return_value = {"files": existing or []}
+        files.list.return_value = list_request
+        folder_request = MagicMock()
+        folder_request.execute.return_value = folder or {
+            "id": "folder-id", "webViewLink": "https://drive/folder-id"
+        }
+        files.create.return_value = folder_request
+        return service
+
+    def test_existing_job_folder_rejects_before_create_or_upload(self):
+        service = self.fake_drive(existing=[{"id": "existing"}])
+        with self.assertRaisesRegex(ValueError, "job folder already exists"):
+            drive_store.upload_files(
+                {"jobs_folder_id": "parent"}, "job-1", [], service=service
+            )
+        service.files.return_value.create.assert_not_called()
+
+    def test_sequential_upload_uses_relative_path_as_drive_name(self):
+        service = self.fake_drive()
+        files_api = service.files.return_value
+        folder_request = files_api.create.return_value
+        upload_one = MagicMock()
+        upload_one.execute.return_value = {"id": "one"}
+        upload_two = MagicMock()
+        upload_two.execute.return_value = {"id": "two"}
+        files_api.create.side_effect = [folder_request, upload_one, upload_two]
+        selected = [(Path("one.py"), "one.py"), (Path("two.py"), "tests/two.py")]
+        with patch("drive_store._media_file_upload", side_effect=["media-1", "media-2"]):
+            url = drive_store.upload_files(
+                {"jobs_folder_id": "parent"}, "job-1", selected, service=service
+            )
+        self.assertEqual(url, "https://drive/folder-id")
+        self.assertEqual(
+            [item.kwargs["body"]["name"] for item in files_api.create.call_args_list[1:]],
+            ["one.py", "tests/two.py"],
+        )
+        self.assertEqual(
+            [item.kwargs["media_body"] for item in files_api.create.call_args_list[1:]],
+            ["media-1", "media-2"],
+        )
+
+    def test_upload_success_result_and_workspace_callback(self):
+        with tempfile.TemporaryDirectory(dir=".") as workspace:
+            Path(workspace, "one.txt").write_text("one", encoding="utf-8")
+            with patch.dict(
+                conduit.WORKSPACES,
+                {"test": self.workspace_config(workspace)},
+                clear=True,
+            ), patch("conduit.load_drive_config", return_value={}), patch(
+                "conduit.upload_files", return_value="https://drive/job"
+            ) as upload, patch("conduit.run_job") as run_job:
+                result = conduit.handle_text(self.make_upload())
+            self.assertEqual(
+                result, "job_id: upload-job; uploaded 1/1; folder: https://drive/job"
+            )
+            upload.assert_called_once()
+            run_job.assert_not_called()
+            self.notify.assert_called_once_with("https://chatgpt.com/c/test", result)
+
+    def test_upload_failure_is_concise_and_callbacks(self):
+        with tempfile.TemporaryDirectory(dir=".") as workspace:
+            Path(workspace, "one.txt").write_text("one", encoding="utf-8")
+            with patch.dict(
+                conduit.WORKSPACES,
+                {"test": self.workspace_config(workspace)},
+                clear=True,
+            ), patch("conduit.load_drive_config", return_value={}), patch(
+                "conduit.upload_files", side_effect=RuntimeError("one.txt: denied\nmore")
+            ):
+                result = conduit.handle_text(self.make_upload())
+            self.assertEqual(
+                result, "UPLOAD_ERROR job_id=upload-job: one.txt: denied more"
+            )
+            self.assertEqual(len(result.splitlines()), 1)
+            self.notify.assert_called_once_with("https://chatgpt.com/c/test", result)
 
     def test_success_returns_only_final_message(self):
         with tempfile.TemporaryDirectory(dir=".") as workspace:

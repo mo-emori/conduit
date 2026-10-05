@@ -1,4 +1,4 @@
-"""Minimal Slack-to-Codex worker for conduit v0.2."""
+"""Minimal Slack-to-Codex worker for conduit v0.3."""
 
 import base64
 import binascii
@@ -14,11 +14,13 @@ import threading
 import tomllib
 from logging.handlers import RotatingFileHandler
 from pathlib import Path
+from pathlib import PurePosixPath, PureWindowsPath
 
 from slack_bolt import App
 from slack_bolt.adapter.socket_mode import SocketModeHandler
 
 from callback import notify_chatgpt
+from drive_store import upload_files
 
 
 CONFIG_PATH = Path(__file__).with_name("config.toml")
@@ -54,6 +56,7 @@ JOB_PATH_PREPEND = load_job_path_prepend()
 PING = "LOCAL-AGENT PING"
 PONG = "LOCAL-AGENT PONG — Worker ready"
 JOB_FIELDS = {"job_id", "workspace", "instruction_base64"}
+UPLOAD_FIELDS = {"operation", "job_id", "workspace", "paths"}
 ENV_KEYS = ("SLACK_BOT_TOKEN", "SLACK_APP_TOKEN", "SLACK_CHANNEL_ID")
 CHATGPT_ATTRIBUTION = re.compile(
     r"\s+\*使用して送信されました\*\s+<@U[A-Z0-9]+>\s*\Z"
@@ -131,12 +134,19 @@ def callback_result(target_url: str, message: str) -> None:
         logger.error("ChatGPT callback failed: %s", exc)
 
 
-def parse_job(text: str) -> dict[str, str]:
+def parse_json_object(text: str) -> dict:
     try:
-        job = json.loads(text)
+        value = json.loads(text)
     except json.JSONDecodeError as exc:
         raise ValueError("invalid JSON") from exc
-    if not isinstance(job, dict) or set(job) != JOB_FIELDS:
+    if not isinstance(value, dict):
+        raise ValueError("invalid fields")
+    return value
+
+
+def parse_job_object(job: dict) -> dict[str, str]:
+    job = job.copy()
+    if set(job) != JOB_FIELDS:
         raise ValueError("invalid fields")
     if not all(isinstance(job[field], str) for field in JOB_FIELDS):
         raise ValueError("invalid fields")
@@ -162,6 +172,73 @@ def parse_job(text: str) -> dict[str, str]:
     del job["instruction_base64"]
     job["instruction"] = instruction
     return job
+
+
+def parse_job(text: str) -> dict[str, str]:
+    return parse_job_object(parse_json_object(text))
+
+
+def parse_upload(value: dict) -> dict:
+    if set(value) != UPLOAD_FIELDS or value.get("operation") != "upload":
+        raise ValueError("invalid fields")
+    if not isinstance(value.get("job_id"), str) or not value["job_id"]:
+        raise ValueError("invalid fields")
+    if not isinstance(value.get("workspace"), str) or not value["workspace"]:
+        raise ValueError("invalid fields")
+    if value["workspace"] not in WORKSPACES:
+        raise ValueError("unknown workspace")
+    paths = value.get("paths")
+    if not isinstance(paths, list) or not paths or not all(
+        isinstance(item, str) and item for item in paths
+    ):
+        raise ValueError("invalid paths")
+    if len(paths) != len(set(paths)):
+        raise ValueError("duplicate paths")
+    if any("\\" in item for item in paths):
+        raise ValueError("backslash path")
+    return value.copy()
+
+
+def validate_upload_paths(workspace_path: str, paths: list[str]) -> list[tuple[Path, str]]:
+    root = Path(workspace_path).resolve()
+    if not root.is_dir():
+        raise ValueError(f"workspace does not exist: {workspace_path}")
+    validated = []
+    for relative in paths:
+        posix_path = PurePosixPath(relative)
+        if (posix_path.is_absolute() or PureWindowsPath(relative).is_absolute()
+                or PureWindowsPath(relative).drive or ".." in posix_path.parts):
+            raise ValueError(f"invalid path: {relative}")
+        local_path = (root / Path(*posix_path.parts)).resolve()
+        try:
+            local_path.relative_to(root)
+        except ValueError as exc:
+            raise ValueError(f"path outside workspace: {relative}") from exc
+        if not local_path.exists():
+            raise ValueError(f"missing path: {relative}")
+        if not local_path.is_file():
+            raise ValueError(f"not a file: {relative}")
+        validated.append((local_path, relative))
+    return validated
+
+
+def load_drive_config(path: Path = CONFIG_PATH) -> dict[str, str]:
+    with path.open("rb") as config_file:
+        drive = tomllib.load(config_file).get("drive")
+    required = ("jobs_folder_id", "credentials_file", "token_file")
+    if not isinstance(drive, dict) or not all(
+        isinstance(drive.get(key), str) and drive[key] for key in required
+    ):
+        raise ValueError("invalid Drive config")
+    for key in ("credentials_file", "token_file"):
+        secret_path = Path(drive[key]).resolve()
+        for workspace in WORKSPACES.values():
+            try:
+                secret_path.relative_to(Path(workspace["path"]).resolve())
+            except ValueError:
+                continue
+            raise ValueError(f"Drive {key} must be outside workspaces")
+    return {key: drive[key] for key in required}
 
 
 def run_job(job: dict[str, str]) -> tuple[int, str, str]:
@@ -244,13 +321,40 @@ def handle_text(text: str) -> str:
         return PONG
 
     try:
-        job = parse_job(text)
-        job_id = job["job_id"]
+        value = parse_json_object(text)
     except ValueError as exc:
         logger.error("Job parse/validation error: %s", exc)
         return f"INVALID_JOB: {exc}"
 
+    is_upload = "operation" in value
+    try:
+        request = parse_upload(value) if is_upload else parse_job_object(value)
+        job_id = request["job_id"]
+    except ValueError as exc:
+        kind = "Upload" if is_upload else "Job"
+        logger.error("%s parse/validation error: %s", kind, exc)
+        return f"{'UPLOAD_ERROR' if is_upload else 'INVALID_JOB'}: {exc}"
+
     with _job_lock:
+        if is_upload:
+            try:
+                validated = validate_upload_paths(
+                    WORKSPACES[request["workspace"]]["path"], request["paths"]
+                )
+                drive_config = load_drive_config()
+                folder_url = upload_files(drive_config, job_id, validated)
+                result = f"job_id: {job_id}; uploaded {len(validated)}/{len(validated)}"
+                if folder_url:
+                    result += f"; folder: {folder_url}"
+            except Exception as exc:
+                result = f"UPLOAD_ERROR job_id={job_id}: {str(exc).replace(chr(10), ' ')}"
+                logger.error("%s", result)
+            callback_result(
+                WORKSPACES[request["workspace"]]["callback_url"], result
+            )
+            return result
+
+        job = request
         logger.info("JOB START job_id=%s workspace=%s", job_id, job["workspace"])
         exit_code, final_message, stderr = run_job(job)
         logger.info("JOB END job_id=%s exit_code=%s", job_id, exit_code)
