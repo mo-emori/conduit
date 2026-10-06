@@ -337,18 +337,47 @@ def handle_text(text: str) -> str:
 
     with _job_lock:
         if is_upload:
+            current_upload_path = None
+
+            def log_upload_file(relative_path: str) -> None:
+                nonlocal current_upload_path
+                current_upload_path = relative_path
+                logger.info("UPLOAD FILE job_id=%s path=%s", job_id, relative_path)
+
             try:
                 validated = validate_upload_paths(
                     WORKSPACES[request["workspace"]]["path"], request["paths"]
                 )
+                logger.info(
+                    "UPLOAD START job_id=%s workspace=%s files=%s",
+                    job_id, request["workspace"], len(validated),
+                )
                 drive_config = load_drive_config()
-                folder_url = upload_files(drive_config, job_id, validated)
+                folder_url = upload_files(
+                    drive_config, job_id, validated, on_file=log_upload_file
+                )
                 result = f"job_id: {job_id}; uploaded {len(validated)}/{len(validated)}"
                 if folder_url:
                     result += f"; folder: {folder_url}"
+                logger.info(
+                    "UPLOAD END job_id=%s uploaded=%s/%s",
+                    job_id, len(validated), len(validated),
+                )
             except Exception as exc:
-                result = f"UPLOAD_ERROR job_id={job_id}: {str(exc).replace(chr(10), ' ')}"
-                logger.error("%s", result)
+                concise_error = str(exc).replace(chr(10), " ")
+                result = f"UPLOAD_ERROR job_id={job_id}: {concise_error}"
+                if current_upload_path is None:
+                    logger.error(
+                        "UPLOAD ERROR job_id=%s error=%s", job_id, concise_error
+                    )
+                else:
+                    log_error = concise_error.removeprefix(
+                        f"{current_upload_path}: "
+                    )
+                    logger.error(
+                        "UPLOAD ERROR job_id=%s path=%s error=%s",
+                        job_id, current_upload_path, log_error,
+                    )
             callback_result(
                 WORKSPACES[request["workspace"]]["callback_url"], result
             )

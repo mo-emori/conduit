@@ -1,6 +1,7 @@
 """Small Google Drive upload implementation for conduit."""
 
 from pathlib import Path
+from typing import Callable
 
 
 SCOPES = ["https://www.googleapis.com/auth/drive"]
@@ -44,6 +45,7 @@ def upload_files(
     job_id: str,
     files: list[tuple[Path, str]],
     service=None,
+    on_file: Callable[[str], None] | None = None,
 ) -> str | None:
     service = service or build_drive_service(config)
     parent_id = config["jobs_folder_id"]
@@ -66,6 +68,8 @@ def upload_files(
     folder_id = folder["id"]
     for local_path, relative_path in files:
         try:
+            if on_file:
+                on_file(relative_path)
             service.files().create(
                 body={"name": relative_path, "parents": [folder_id]},
                 media_body=_media_file_upload(local_path),

@@ -386,20 +386,77 @@ multiple lines
     def test_upload_success_result_and_workspace_callback(self):
         with tempfile.TemporaryDirectory(dir=".") as workspace:
             Path(workspace, "one.txt").write_text("one", encoding="utf-8")
+            Path(workspace, "two.txt").write_text("two", encoding="utf-8")
             with patch.dict(
                 conduit.WORKSPACES,
                 {"test": self.workspace_config(workspace)},
                 clear=True,
             ), patch("conduit.load_drive_config", return_value={}), patch(
-                "conduit.upload_files", return_value="https://drive/job"
+                "conduit.upload_files"
             ) as upload, patch("conduit.run_job") as run_job:
-                result = conduit.handle_text(self.make_upload())
+                upload.side_effect = lambda config, job_id, files, on_file: (
+                    [on_file(relative_path) for _, relative_path in files]
+                    and "https://drive/job"
+                )
+                with self.assertLogs(conduit.logger, level="INFO") as logs:
+                    result = conduit.handle_text(
+                        self.make_upload(["one.txt", "two.txt"])
+                    )
             self.assertEqual(
-                result, "job_id: upload-job; uploaded 1/1; folder: https://drive/job"
+                result, "job_id: upload-job; uploaded 2/2; folder: https://drive/job"
             )
             upload.assert_called_once()
             run_job.assert_not_called()
             self.notify.assert_called_once_with("https://chatgpt.com/c/test", result)
+            messages = [record.getMessage() for record in logs.records]
+            self.assertEqual(messages, [
+                "UPLOAD START job_id=upload-job workspace=test files=2",
+                "UPLOAD FILE job_id=upload-job path=one.txt",
+                "UPLOAD FILE job_id=upload-job path=two.txt",
+                "UPLOAD END job_id=upload-job uploaded=2/2",
+            ])
+
+    def test_upload_logs_files_in_order_and_failed_relative_path(self):
+        with tempfile.TemporaryDirectory(dir=".") as workspace:
+            Path(workspace, "one.txt").write_text("one", encoding="utf-8")
+            Path(workspace, "two.txt").write_text("two", encoding="utf-8")
+            service = self.fake_drive()
+            files_api = service.files.return_value
+            folder_request = files_api.create.return_value
+            upload_one = MagicMock()
+            upload_one.execute.return_value = {"id": "one"}
+            upload_two = MagicMock()
+            upload_two.execute.side_effect = RuntimeError("denied")
+            files_api.create.side_effect = [folder_request, upload_one, upload_two]
+            with patch.dict(
+                conduit.WORKSPACES,
+                {"test": self.workspace_config(workspace)},
+                clear=True,
+            ), patch(
+                "conduit.load_drive_config", return_value={"jobs_folder_id": "parent"}
+            ), patch(
+                "conduit.upload_files",
+                side_effect=lambda config, job_id, files, on_file: drive_store.upload_files(
+                    config, job_id, files, service=service, on_file=on_file
+                ),
+            ), patch("drive_store._media_file_upload", return_value="media"), patch(
+                "conduit.run_job"
+            ) as run_job:
+                with self.assertLogs(conduit.logger, level="INFO") as logs:
+                    result = conduit.handle_text(self.make_upload(["one.txt", "two.txt"]))
+            self.assertEqual(result, "UPLOAD_ERROR job_id=upload-job: two.txt: denied")
+            self.notify.assert_called_once_with("https://chatgpt.com/c/test", result)
+            run_job.assert_not_called()
+            messages = [record.getMessage() for record in logs.records]
+            self.assertEqual(messages[:3], [
+                "UPLOAD START job_id=upload-job workspace=test files=2",
+                "UPLOAD FILE job_id=upload-job path=one.txt",
+                "UPLOAD FILE job_id=upload-job path=two.txt",
+            ])
+            self.assertEqual(
+                messages[3],
+                "UPLOAD ERROR job_id=upload-job path=two.txt error=denied",
+            )
 
     def test_upload_failure_is_concise_and_callbacks(self):
         with tempfile.TemporaryDirectory(dir=".") as workspace:
