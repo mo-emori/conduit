@@ -414,6 +414,8 @@ multiple lines
                 "UPLOAD FILE job_id=upload-job path=one.txt",
                 "UPLOAD FILE job_id=upload-job path=two.txt",
                 "UPLOAD END job_id=upload-job uploaded=2/2",
+                "CALLBACK START job_id=upload-job workspace=test",
+                "CALLBACK END job_id=upload-job",
             ])
 
     def test_upload_logs_files_in_order_and_failed_relative_path(self):
@@ -483,8 +485,13 @@ multiple lines
                 with self.assertLogs(conduit.logger, level="INFO") as logs:
                     response = conduit.handle_text(self.make_job(job_id="ok-1"))
         self.assertEqual(response, "done")
-        self.assertTrue(any("JOB START job_id=ok-1 workspace=test" in line for line in logs.output))
-        self.assertTrue(any("JOB END job_id=ok-1 exit_code=0" in line for line in logs.output))
+        messages = [record.getMessage() for record in logs.records]
+        self.assertEqual(messages, [
+            "JOB START job_id=ok-1 workspace=test",
+            "JOB END job_id=ok-1 exit_code=0",
+            "CALLBACK START job_id=ok-1 workspace=test",
+            "CALLBACK END job_id=ok-1",
+        ])
         self.notify.assert_called_once_with("https://chatgpt.com/c/test", "done")
 
     def test_kairos_job_uses_kairos_callback_url(self):
@@ -512,16 +519,22 @@ multiple lines
         self.notify.assert_called_once_with("https://chatgpt.com/c/test", response)
 
     def test_callback_failure_does_not_repeat_or_escape(self):
-        self.notify.side_effect = RuntimeError("browser unavailable")
+        self.notify.side_effect = RuntimeError("browser unavailable\nretry later")
         with tempfile.TemporaryDirectory(dir=".") as workspace:
             with patch.dict(conduit.WORKSPACES, {"test": self.workspace_config(workspace)}), patch.object(
                 conduit, "run_job", return_value=(0, "done", "")
-            ) as run_job, self.assertLogs(conduit.logger, level="ERROR") as logs:
+            ) as run_job, self.assertLogs(conduit.logger, level="INFO") as logs:
                 response = conduit.handle_text(self.make_job(job_id="ok-3"))
         self.assertEqual(response, "done")
         run_job.assert_called_once()
         self.notify.assert_called_once_with("https://chatgpt.com/c/test", "done")
-        self.assertTrue(any("ChatGPT callback failed" in line for line in logs.output))
+        messages = [record.getMessage() for record in logs.records]
+        self.assertIn("CALLBACK START job_id=ok-3 workspace=test", messages)
+        self.assertIn(
+            "CALLBACK ERROR job_id=ok-3 error=browser unavailable retry later",
+            messages,
+        )
+        self.assertNotIn("CALLBACK END job_id=ok-3", messages)
 
     def test_run_job_passes_instruction_on_stdin(self):
         observed_job_tmp = None

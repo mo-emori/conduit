@@ -127,11 +127,21 @@ def remove_chatgpt_attribution(text: str) -> str:
     return CHATGPT_ATTRIBUTION.sub("", text)
 
 
-def callback_result(target_url: str, message: str) -> None:
+def callback_result(
+    target_url: str, message: str, job_id: str, workspace: str
+) -> None:
+    logger.info(
+        "CALLBACK START job_id=%s workspace=%s", job_id, workspace
+    )
     try:
         notify_chatgpt(target_url, message)
     except Exception as exc:
-        logger.error("ChatGPT callback failed: %s", exc)
+        concise_error = str(exc).replace("\r", " ").replace("\n", " ")
+        logger.error(
+            "CALLBACK ERROR job_id=%s error=%s", job_id, concise_error
+        )
+    else:
+        logger.info("CALLBACK END job_id=%s", job_id)
 
 
 def parse_json_object(text: str) -> dict:
@@ -379,7 +389,10 @@ def handle_text(text: str) -> str:
                         job_id, current_upload_path, log_error,
                     )
             callback_result(
-                WORKSPACES[request["workspace"]]["callback_url"], result
+                WORKSPACES[request["workspace"]]["callback_url"],
+                result,
+                job_id,
+                request["workspace"],
             )
             return result
 
@@ -399,7 +412,12 @@ def handle_text(text: str) -> str:
             if exit_code == 0:
                 exit_code, stderr = 1, stderr or "Codex produced no final message"
             result = error_message(job_id, exit_code, stderr)
-        callback_result(WORKSPACES[job["workspace"]]["callback_url"], result)
+        callback_result(
+            WORKSPACES[job["workspace"]]["callback_url"],
+            result,
+            job_id,
+            job["workspace"],
+        )
     return result
 
 
