@@ -1,6 +1,8 @@
 # conduit
 
-v0.3 adds an explicit Google Drive upload operation while preserving the v0.2 Codex Job contract.
+v0.3 adds an explicit Google Drive upload operation. The current wire requires a sender for both Codex Jobs and Uploads.
+
+`workspace` selects the local execution path. `sender` independently selects the registered ChatGPT callback URL. Both names must be configured, and legacy messages without `sender` are rejected. The wire never contains a callback URL.
 
 Configure the existing `My Drive/chatgpt/jobs` folder ID and external OAuth files in `config.toml`:
 
@@ -18,11 +20,12 @@ An upload message is a separate strict JSON object:
   "operation": "upload",
   "job_id": "example-001",
   "workspace": "kairos",
+  "sender": "conduit",
   "paths": ["main.py", "tests/test_llm.py"]
 }
 ```
 
-As with Codex Jobs, the sender must JSON-serialize and Slack-send this object in one programmatic tool execution; do not compose escaped JSON manually.
+As with Codex Jobs, the sending tool must JSON-serialize and Slack-send this object in one programmatic tool execution; do not compose escaped JSON manually.
 
 Slack から Job を受け取り、指定 workspace で Codex CLI を実行する v0.2 の最小 Worker です。
 
@@ -33,17 +36,20 @@ Slack から Job を受け取り、指定 workspace で Codex CLI を実行す�
 python conduit.py
 ```
 
-`config.toml` は workspace ごとのローカルパスと ChatGPT Web callback 先を管理します。
-workspace を追加するときは `path` と `callback_url` の2項目だけを設定してください。
+`config.toml` では workspace ごとにローカルパスを、sender ごとに ChatGPT Web callback 先を設定します。
 
 ```toml
 [workspaces.conduit]
 path = "C:\\dev\\conduit"
-callback_url = "https://chatgpt.com/c/6ac26caf-b63c-83ec-83d0-9f8d926c3df7"
 
 [workspaces.kairos]
 path = "C:\\dev\\kairos"
-callback_url = "https://chatgpt.com/c/6ac26c6e-9710-83ee-b641-9f17d64cd7a9"
+
+[senders.conduit]
+callback_url = "https://chatgpt.com/c/6ac26caf-b63c-83ec-83d0-9f8d926c3df7"
+
+[senders.kairos]
+callback_url = "https://chatgpt.com/c/6acaae4a-3010-83ec-8cfe-d1a773081a3c"
 ```
 
 `.env` は従来どおり Slack の secret / local settings 専用です。
@@ -61,6 +67,7 @@ Slack App では Socket Mode を有効にし、`app_token` に `connections:writ
 {
   "job_id": "example-001",
   "workspace": "kairos",
+  "sender": "conduit",
   "instruction_base64": "<UTF-8 instruction encoded as Base64>"
 }
 ```
@@ -72,7 +79,7 @@ Base64、JSONの順に機械的に変換して生成してください。Base64 
 Job は逐次実行され、返信は元メッセージの thread に投稿されます。
 
 ChatGPT Web callbackには、Chromeをremote debugging port `9222`で起動し、ログイン済みの
-ChromeでJobのworkspaceに設定したcallback先のチャットを1タブだけ開いておく必要があります。
+ChromeでJobのsenderに設定したcallback先のチャットを1タブだけ開いておく必要があります。
 
 実行ログは標準出力と `logs/conduit.log` に出力されます。ログファイルは最大10MB、
 10世代保持です。

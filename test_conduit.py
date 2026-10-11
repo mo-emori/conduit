@@ -15,27 +15,35 @@ class ConduitTests(unittest.TestCase):
         notify_patcher = patch("conduit.notify_chatgpt")
         self.notify = notify_patcher.start()
         self.addCleanup(notify_patcher.stop)
+        senders_patcher = patch.dict(
+            conduit.SENDERS,
+            {"test": {"callback_url": "https://chatgpt.com/c/test"}},
+        )
+        senders_patcher.start()
+        self.addCleanup(senders_patcher.stop)
 
     @staticmethod
-    def workspace_config(path, callback_url="https://chatgpt.com/c/test"):
-        return {"path": path, "callback_url": callback_url}
+    def workspace_config(path):
+        return {"path": path}
 
     @staticmethod
-    def make_job(instruction="test", job_id="test-job", workspace="test"):
+    def make_job(instruction="test", job_id="test-job", workspace="test", sender="test"):
         return json.dumps({
             "job_id": job_id,
             "workspace": workspace,
+            "sender": sender,
             "instruction_base64": base64.b64encode(
                 instruction.encode("utf-8")
             ).decode("ascii"),
         })
 
     @staticmethod
-    def make_upload(paths=None, job_id="upload-job", workspace="test"):
+    def make_upload(paths=None, job_id="upload-job", workspace="test", sender="test"):
         return json.dumps({
             "operation": "upload",
             "job_id": job_id,
             "workspace": workspace,
+            "sender": sender,
             "paths": paths if paths is not None else ["one.txt"],
         })
 
@@ -43,13 +51,16 @@ class ConduitTests(unittest.TestCase):
         workspaces = conduit.load_workspaces()
         self.assertEqual(workspaces["conduit"]["path"], r"C:\dev\conduit")
         self.assertEqual(workspaces["kairos"]["path"], r"C:\dev\kairos")
+        senders = conduit.load_senders()
+        self.assertEqual(set(workspaces["conduit"]), {"path"})
+        self.assertEqual(set(senders["conduit"]), {"callback_url"})
         self.assertEqual(
-            workspaces["conduit"]["callback_url"],
+            senders["conduit"]["callback_url"],
             "https://chatgpt.com/c/6ac26caf-b63c-83ec-83d0-9f8d926c3df7",
         )
         self.assertEqual(
-            workspaces["kairos"]["callback_url"],
-            "https://chatgpt.com/c/6ac26c6e-9710-83ee-b641-9f17d64cd7a9",
+            senders["kairos"]["callback_url"],
+            "https://chatgpt.com/c/6acaae4a-3010-83ec-8cfe-d1a773081a3c",
         )
         self.assertEqual(
             conduit.load_job_path_prepend(),
@@ -65,9 +76,21 @@ class ConduitTests(unittest.TestCase):
             config_file.write_text("[workspaces.test]\ncallback_url = 'url'\n", encoding="utf-8")
             with self.assertRaisesRegex(ValueError, "has no path"):
                 conduit.load_workspaces(config_file)
-            config_file.write_text("[workspaces.test]\npath = 'path'\n", encoding="utf-8")
+            config_file.write_text("[senders.test]\n", encoding="utf-8")
             with self.assertRaisesRegex(ValueError, "has no callback_url"):
+                conduit.load_senders(config_file)
+            config_file.write_text(
+                "[workspaces.test]\npath = 'path'\ncallback_url = 'url'\n",
+                encoding="utf-8",
+            )
+            with self.assertRaisesRegex(ValueError, "invalid fields"):
                 conduit.load_workspaces(config_file)
+            config_file.write_text(
+                "[senders.test]\ncallback_url = 'url'\npath = 'path'\n",
+                encoding="utf-8",
+            )
+            with self.assertRaisesRegex(ValueError, "invalid fields"):
+                conduit.load_senders(config_file)
 
     def test_load_dotenv(self):
         with tempfile.TemporaryDirectory(dir=".") as directory:
@@ -174,15 +197,22 @@ multiple lines
                 "extra": True,
             })),
             ("empty job ID", "invalid fields", self.make_job(job_id="")),
+            ("empty sender", "invalid fields", self.make_job(sender="")),
+            ("unknown sender", "unknown sender", self.make_job(sender="unknown")),
+            ("legacy wire", "invalid fields", json.dumps({
+                "job_id": "one", "workspace": "test", "instruction_base64": "dGVzdA=="
+            })),
             ("unknown workspace", "unknown workspace", self.make_job(workspace="unknown")),
             ("invalid Base64", "invalid instruction Base64", json.dumps({
                 "job_id": "one",
                 "workspace": "test",
+                "sender": "test",
                 "instruction_base64": "not base64!",
             })),
             ("invalid UTF-8", "invalid instruction UTF-8", json.dumps({
                 "job_id": "one",
                 "workspace": "test",
+                "sender": "test",
                 "instruction_base64": base64.b64encode(b"\xff\xfe").decode("ascii"),
             })),
             ("empty instruction", "empty instruction", self.make_job(instruction="")),
@@ -269,6 +299,39 @@ multiple lines
             self.assertEqual(upload["operation"], "upload")
             with self.assertRaisesRegex(ValueError, "invalid fields"):
                 conduit.parse_job_object(json.loads(self.make_job()) | {"operation": "upload"})
+
+    def test_upload_rejects_missing_empty_and_unknown_sender(self):
+        for sender, expected in ((None, "invalid fields"), ("", "invalid fields"),
+                                 ("unknown", "unknown sender")):
+            value = json.loads(self.make_upload(sender=sender))
+            if sender is None:
+                del value["sender"]
+            with self.subTest(sender=sender), patch.dict(
+                conduit.WORKSPACES, {"test": self.workspace_config(".")}, clear=True
+            ), self.assertRaisesRegex(ValueError, expected):
+                conduit.parse_upload(value)
+        self.notify.assert_not_called()
+
+    def test_cross_workspace_codex_uses_sender_callback(self):
+        with tempfile.TemporaryDirectory(dir=".") as workspace, patch.dict(
+            conduit.WORKSPACES, {"kairos": self.workspace_config(workspace)}, clear=True
+        ), patch.object(conduit, "run_job", return_value=(0, "done", "")) as run_job:
+            result = conduit.handle_text(self.make_job(workspace="kairos", sender="conduit"))
+        self.assertEqual(result, "done")
+        self.assertEqual(run_job.call_args.args[0]["workspace"], "kairos")
+        self.notify.assert_called_once_with(
+            conduit.SENDERS["conduit"]["callback_url"], "done"
+        )
+
+    def test_cross_workspace_upload_uses_sender_callback(self):
+        with tempfile.TemporaryDirectory(dir=".") as workspace:
+            Path(workspace, "one.txt").write_text("one", encoding="utf-8")
+            with patch.dict(conduit.WORKSPACES, {"kairos": self.workspace_config(workspace)}, clear=True), patch(
+                "conduit.load_drive_config", return_value={}
+            ), patch("conduit.upload_files", return_value="https://drive/job") as upload:
+                result = conduit.handle_text(self.make_upload(workspace="kairos", sender="conduit"))
+            self.assertEqual(upload.call_args.args[2][0][0], Path(workspace, "one.txt").resolve())
+        self.notify.assert_called_once_with(conduit.SENDERS["conduit"]["callback_url"], result)
 
     def test_upload_path_list_rules(self):
         with tempfile.TemporaryDirectory(dir=".") as workspace, patch.dict(
@@ -495,14 +558,14 @@ multiple lines
         self.notify.assert_called_once_with("https://chatgpt.com/c/test", "done")
 
     def test_kairos_job_uses_kairos_callback_url(self):
-        kairos_url = conduit.WORKSPACES["kairos"]["callback_url"]
+        kairos_url = conduit.SENDERS["kairos"]["callback_url"]
         with tempfile.TemporaryDirectory(dir=".") as workspace:
-            kairos = self.workspace_config(workspace, kairos_url)
+            kairos = self.workspace_config(workspace)
             with patch.dict(conduit.WORKSPACES, {"kairos": kairos}, clear=True), patch.object(
                 conduit, "run_job", return_value=(0, "kairos result", "")
             ):
                 conduit.handle_text(self.make_job(
-                    job_id="kairos-1", workspace="kairos"
+                    job_id="kairos-1", workspace="kairos", sender="kairos"
                 ))
         self.notify.assert_called_once_with(kairos_url, "kairos result")
 

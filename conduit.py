@@ -37,9 +37,22 @@ def load_workspaces(path: Path = CONFIG_PATH) -> dict[str, dict[str, str]]:
     for name, workspace in workspaces.items():
         if not isinstance(workspace, dict) or not workspace.get("path"):
             raise ValueError(f"config.toml: workspace '{name}' has no path")
-        if not workspace.get("callback_url"):
-            raise ValueError(f"config.toml: workspace '{name}' has no callback_url")
+        if set(workspace) != {"path"}:
+            raise ValueError(f"config.toml: workspace '{name}' has invalid fields")
     return workspaces
+
+
+def load_senders(path: Path = CONFIG_PATH) -> dict[str, dict[str, str]]:
+    with path.open("rb") as config_file:
+        senders = tomllib.load(config_file).get("senders", {})
+    if not isinstance(senders, dict):
+        raise ValueError("config.toml: senders must be a table")
+    for name, sender in senders.items():
+        if not isinstance(sender, dict) or not isinstance(sender.get("callback_url"), str) or not sender["callback_url"]:
+            raise ValueError(f"config.toml: sender '{name}' has no callback_url")
+        if set(sender) != {"callback_url"}:
+            raise ValueError(f"config.toml: sender '{name}' has invalid fields")
+    return senders
 
 
 def load_job_path_prepend(path: Path = CONFIG_PATH) -> list[str]:
@@ -51,12 +64,13 @@ def load_job_path_prepend(path: Path = CONFIG_PATH) -> list[str]:
 
 
 WORKSPACES = load_workspaces()
+SENDERS = load_senders()
 JOB_PATH_PREPEND = load_job_path_prepend()
 
 PING = "LOCAL-AGENT PING"
 PONG = "LOCAL-AGENT PONG — Worker ready"
-JOB_FIELDS = {"job_id", "workspace", "instruction_base64"}
-UPLOAD_FIELDS = {"operation", "job_id", "workspace", "paths"}
+JOB_FIELDS = {"job_id", "workspace", "sender", "instruction_base64"}
+UPLOAD_FIELDS = {"operation", "job_id", "workspace", "sender", "paths"}
 ENV_KEYS = ("SLACK_BOT_TOKEN", "SLACK_APP_TOKEN", "SLACK_CHANNEL_ID")
 CHATGPT_ATTRIBUTION = re.compile(
     r"\s+\*使用して送信されました\*\s+<@U[A-Z0-9]+>\s*\Z"
@@ -160,7 +174,7 @@ def parse_job_object(job: dict) -> dict[str, str]:
         raise ValueError("invalid fields")
     if not all(isinstance(job[field], str) for field in JOB_FIELDS):
         raise ValueError("invalid fields")
-    if not job["job_id"] or not job["workspace"]:
+    if not job["job_id"] or not job["workspace"] or not job["sender"]:
         raise ValueError("invalid fields")
     try:
         instruction_bytes = base64.b64decode(
@@ -176,6 +190,8 @@ def parse_job_object(job: dict) -> dict[str, str]:
         raise ValueError("empty instruction")
     if job["workspace"] not in WORKSPACES:
         raise ValueError("unknown workspace")
+    if job["sender"] not in SENDERS:
+        raise ValueError("unknown sender")
     workspace_path = WORKSPACES[job["workspace"]]["path"]
     if not Path(workspace_path).is_dir():
         raise ValueError(f"workspace does not exist: {workspace_path}")
@@ -195,8 +211,12 @@ def parse_upload(value: dict) -> dict:
         raise ValueError("invalid fields")
     if not isinstance(value.get("workspace"), str) or not value["workspace"]:
         raise ValueError("invalid fields")
+    if not isinstance(value.get("sender"), str) or not value["sender"]:
+        raise ValueError("invalid fields")
     if value["workspace"] not in WORKSPACES:
         raise ValueError("unknown workspace")
+    if value["sender"] not in SENDERS:
+        raise ValueError("unknown sender")
     paths = value.get("paths")
     if not isinstance(paths, list) or not paths or not all(
         isinstance(item, str) and item for item in paths
@@ -389,7 +409,7 @@ def handle_text(text: str) -> str:
                         job_id, current_upload_path, log_error,
                     )
             callback_result(
-                WORKSPACES[request["workspace"]]["callback_url"],
+                SENDERS[request["sender"]]["callback_url"],
                 result,
                 job_id,
                 request["workspace"],
@@ -413,7 +433,7 @@ def handle_text(text: str) -> str:
                 exit_code, stderr = 1, stderr or "Codex produced no final message"
             result = error_message(job_id, exit_code, stderr)
         callback_result(
-            WORKSPACES[job["workspace"]]["callback_url"],
+            SENDERS[job["sender"]]["callback_url"],
             result,
             job_id,
             job["workspace"],

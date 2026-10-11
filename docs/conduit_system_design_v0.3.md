@@ -33,7 +33,7 @@ The following behavior is implemented and has already been proven:
 - Each Job receives a workspace-local `.conduit-tmp/job-<random>` directory through `TMPDIR`; that directory is cleaned after the Job.
 - A Git commit is the development baseline. `conduit` does not implement baseline management.
 
-The v0.2 execution contract remains unchanged by this design. In particular, Drive upload is not inferred from a normal Job and is not added to the existing three-field Job JSON.
+These are historical v0.2 baseline claims, retained for the already tagged v0.3.0. The proposed v0.3.x wire revision in Section 4 changes the Job fields; Drive upload remains a separate, explicit operation.
 
 ## 3. v0.3 scope: explicit Drive artifact upload
 
@@ -60,26 +60,51 @@ tests/test_vertical_slice.py
 
 `conduit` must not infer artifact paths from Codex final prose, a Git diff, repository scanning, or any automatic artifact-discovery process. ChatGPT or a human supplies the complete path selection explicitly.
 
-## 4. Upload operation and wire contract
+## 4. Proposed v0.3.x routing and wire revision
 
-Upload is a separate JSON operation issued after implementation or review. Dispatch is determined from the parsed JSON object: if it contains the key `operation`, route it to the upload parser; otherwise route it to the existing Codex Job parser.
+This is a compatibility-breaking proposal for review in ChatGPT before implementation, distinct from the behavior already tagged v0.3.0. `workspace` selects the local execution root; `sender` selects the registered ChatGPT callback destination. They are independent: `workspace=kairos, sender=conduit` executes in `C:/dev/kairos` and returns to the conduit chat.
 
-The upload object contains exactly:
+`config.toml` separates the two registrations:
+
+```toml
+[workspaces.conduit]
+path = "C:/dev/conduit"
+
+[workspaces.kairos]
+path = "C:/dev/kairos"
+
+[senders.conduit]
+callback_url = "https://chatgpt.com/c/6ac26caf-b63c-83ec-83d0-9f8d926c3df7"
+
+[senders.kairos]
+callback_url = "https://chatgpt.com/c/6acaae4a-3010-83ec-8cfe-d1a773081a3c"
+```
+
+Each `[workspaces.<name>]` contains only the local execution path. Each `[senders.<name>]` contains the callback URL for a registered ChatGPT chat. Both Codex and Upload callbacks use `SENDERS[sender].callback_url`, never `WORKSPACES[workspace].callback_url`. The wire carries no arbitrary callback URL.
+
+A Codex Job contains exactly four fields:
+
+```json
+{"job_id":"...","workspace":"...","sender":"...","instruction_base64":"..."}
+```
+
+Upload remains a separate JSON operation issued after implementation or review. Dispatch is determined from the parsed JSON object: if it contains `operation`, route to the upload parser; otherwise route to the Codex Job parser. The upload object contains exactly five fields:
 
 ```json
 {
   "operation": "upload",
   "job_id": "...",
   "workspace": "...",
+  "sender": "...",
   "paths": ["..."]
 }
 ```
 
-`operation` must equal `upload`. `paths` must be a non-empty array of non-empty strings with no duplicates. Path strings use `/` separators only; any path containing a backslash is rejected.
+`sender` is mandatory, a non-empty string, and must match a configured `senders` key for both operations. Legacy objects without `sender` are rejected; there is no backward compatibility or implicit callback selection. Existing strict field validation remains: extra or missing fields are rejected, `operation` must equal `upload`, and `paths` must be a non-empty array of non-empty strings with no duplicates. Path strings use `/` separators only; any path containing a backslash is rejected.
 
-The existing strict Codex Job parser is unchanged: a Job remains JSON containing exactly `job_id`, `workspace`, and `instruction_base64`. `operation` is not added to Jobs as an optional or ignored field.
+`operation` is not added to Jobs as an optional or ignored field. Existing Job ID, workspace, instruction UTF-8/Base64, and upload path validation rules remain in force.
 
-As with an existing Job, the sender mechanically JSON-serializes and Slack-sends the upload object in one tool execution. Manually composed JSON escaping is prohibited.
+For both wires, the sending tool mechanically performs UTF-8/Base64 encoding where applicable, JSON serialization, and Slack send in one tool execution. LLM-generated or manually composed Base64, copied Base64 between steps, and manually composed JSON escaping remain prohibited.
 
 ## 5. Path handling
 
@@ -184,6 +209,8 @@ design update
 
 No Drive implementation or dependency addition occurs during the design-update step.
 
+For the proposed v0.3.x revision, review this design in ChatGPT first. Migration then updates `config.toml`, both parsers and dispatch, and callback selection for Codex and Upload; updates tests and README; and runs end-to-end checks for both paths, including a cross-workspace callback and rejection of legacy wires without `sender`. After implementation and validation, update the Notion page `chatgpt development rules` separately with a concise dated change-history section. This design Job does not modify Notion.
+
 ## 11. Anti-bloat rules
 
 Before adding any mechanism, ask:
@@ -193,6 +220,8 @@ Before adding any mechanism, ask:
 If not, do not add it. Prefer existing platform behavior from ChatGPT, Codex, Git, Slack, the OS, and Google Drive over duplicating it inside `conduit`.
 
 Design and implementation changes must address actual observed problems only. Do not add speculative abstraction, recovery machinery, protocol flexibility, security frameworks, or lifecycle concepts because they might become useful later. Keep the operation synchronous, sequential, explicit, and small.
+
+The sender revision adds no sender manager, routing framework, extra abstraction, or fallback behavior.
 
 ## 12. v0.3 definition
 
