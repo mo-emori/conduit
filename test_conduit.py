@@ -47,6 +47,122 @@ class ConduitTests(unittest.TestCase):
             "paths": paths if paths is not None else ["one.txt"],
         })
 
+    def test_drive_input_schema_and_paths(self):
+        with tempfile.TemporaryDirectory(dir=".") as workspace, patch.dict(
+            conduit.WORKSPACES, {"test": self.workspace_config(workspace)}
+        ):
+            base = json.loads(self.make_job())
+            self.assertNotIn("drive_inputs", conduit.parse_job(json.dumps(base)))
+            base["drive_inputs"] = [{"file_id": "id1", "name": "batch/data.json"}]
+            self.assertEqual(conduit.parse_job(json.dumps(base))["drive_inputs"], base["drive_inputs"])
+            with self.assertRaises(ValueError):
+                conduit.parse_job(json.dumps(dict(base, drive_inputs=[{"file_id": "", "name": "a"}])))
+            for name in ("", "/a", "../a", "a//b", "a/./b", "a\\b", "C:/a",
+                         "CON.txt", "a?.txt", "a.", "a "):
+                trial = dict(base, drive_inputs=[{"file_id": "a", "name": name}])
+                with self.subTest(name=name), self.assertRaises(ValueError):
+                    conduit.parse_job(json.dumps(trial))
+            for items in (
+                [],
+                [{"file_id": "a", "name": "a", "extra": 1}],
+                [{"file_id": "a", "name": "a"}, {"file_id": "a", "name": "b"}],
+                [{"file_id": "a", "name": "A"}, {"file_id": "b", "name": "a"}],
+                [{"file_id": str(i), "name": str(i)} for i in range(9)],
+            ):
+                with self.subTest(items=items), self.assertRaises(ValueError):
+                    conduit.parse_job(json.dumps(dict(base, drive_inputs=items)))
+            with self.assertRaises(ValueError):
+                conduit.parse_job(json.dumps(dict(base, extra=1)))
+
+    def test_drive_prefetch_success_and_failure_callback(self):
+        with tempfile.TemporaryDirectory(dir=".") as workspace, patch.dict(
+            conduit.WORKSPACES, {"test": self.workspace_config(workspace)}
+        ), patch("conduit.shutil.which", return_value="codex"), patch(
+            "conduit.load_drive_config", return_value={}
+        ):
+            wire = json.loads(self.make_job("original instruction"))
+            wire["drive_inputs"] = [{"file_id": "id", "name": "a/input.bin"}]
+
+            def downloaded(config, inputs, dest):
+                path = dest / "a" / "input.bin"
+                path.parent.mkdir(parents=True)
+                path.write_bytes(b"data")
+                return [path]
+
+            class Process:
+                stdout = iter(())
+                stderr = MagicMock()
+                stderr.readline = MagicMock(return_value="")
+                stdin = MagicMock()
+                def wait(self): return 0
+
+            def popen(command, **kwargs):
+                Path(command[command.index("-o") + 1]).write_text("done", encoding="utf-8")
+                self.assertIn("a/input.bin", kwargs["env"]["TMPDIR"] + " a/input.bin")
+                return process
+
+            process = Process()
+            with patch("conduit.download_inputs", side_effect=downloaded), patch(
+                "conduit.subprocess.Popen", side_effect=popen
+            ) as launch:
+                self.assertEqual(conduit.handle_text(json.dumps(wire)), "done")
+                launch.assert_called_once()
+                self.assertIn("original instruction", process.stdin.write.call_args.args[0])
+                self.assertIn("a/input.bin", process.stdin.write.call_args.args[0])
+            self.assertEqual(list((Path(workspace) / ".conduit-tmp").iterdir()), [])
+            self.notify.assert_called_with("https://chatgpt.com/c/test", "done")
+
+            with patch("conduit.download_inputs", side_effect=ValueError("a/input.bin: inaccessible")), patch(
+                "conduit.subprocess.Popen"
+            ) as launch:
+                result = conduit.handle_text(json.dumps(wire))
+                launch.assert_not_called()
+            self.assertIn("job_id: test-job", result)
+            self.assertIn("a/input.bin: inaccessible", result)
+            self.assertEqual(list((Path(workspace) / ".conduit-tmp").iterdir()), [])
+            self.notify.assert_called_with("https://chatgpt.com/c/test", result)
+
+    def test_drive_metadata_preflight_rejects_unsupported_and_oversize(self):
+        with tempfile.TemporaryDirectory(dir=".") as tmp:
+            items = [{"file_id": "id", "name": "input.bin"}]
+            for metadata in (
+                {"mimeType": "application/vnd.google-apps.folder", "size": "1"},
+                {"mimeType": "application/vnd.google-apps.document", "size": "1"},
+                {"mimeType": "application/octet-stream", "size": "1", "trashed": True},
+                {"mimeType": "application/octet-stream", "size": str(10 * 1024 * 1024 + 1)},
+            ):
+                service = MagicMock()
+                service.files.return_value.get.return_value.execute.return_value = metadata
+                with self.subTest(metadata=metadata), self.assertRaises(ValueError):
+                    drive_store.download_inputs({}, items, Path(tmp) / "inputs", service)
+                service.files.return_value.get_media.assert_not_called()
+
+    def test_drive_download_stream_limit_and_partial_cleanup_by_job(self):
+        with tempfile.TemporaryDirectory(dir=".") as workspace, patch.dict(
+            conduit.WORKSPACES, {"test": self.workspace_config(workspace)}
+        ), patch("conduit.shutil.which", return_value="codex"), patch(
+            "conduit.load_drive_config", return_value={}
+        ):
+            wire = json.loads(self.make_job())
+            wire["drive_inputs"] = [{"file_id": "a", "name": "a.bin"},
+                                    {"file_id": "b", "name": "b.bin"}]
+            service = MagicMock()
+            service.files.return_value.get.return_value.execute.return_value = {
+                "mimeType": "application/octet-stream", "size": "1", "trashed": False
+            }
+            def downloader(output, request, chunksize):
+                mock = MagicMock()
+                mock.next_chunk.side_effect = lambda num_retries: (output.write(b"x" * (10 * 1024 * 1024 + 1)), True)
+                return mock
+            with patch("drive_store.build_drive_service", return_value=service), patch(
+                "googleapiclient.http.MediaIoBaseDownload", side_effect=downloader
+            ), patch("conduit.subprocess.Popen") as launch:
+                result = conduit.handle_text(json.dumps(wire))
+            self.assertIn("a.bin", result)
+            self.assertIn("size limit", result)
+            launch.assert_not_called()
+            self.assertEqual(list((Path(workspace) / ".conduit-tmp").iterdir()), [])
+
     def test_workspace_and_callback_resolution(self):
         workspaces = conduit.load_workspaces()
         self.assertEqual(workspaces["conduit"]["path"], r"C:\dev\conduit")

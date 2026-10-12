@@ -265,3 +265,28 @@ Ignore irrelevant events, echoes, and messages from other Slack senders. Process
 - [ ] Verify echoes and irrelevant events are ignored; reject malformed or unaddressed content and a forged `sender=dot` from another Slack user. Check for actual redelivery before designing deduplication.
 
 Keep implementation changes minimal: one channel-specific message path using existing callback and logs. Add no polling service, orchestration, generalized routing, persistent message database, retries, or arbitrary callback URL. The next review gate is actual delivery to conduit through Socket Mode, followed by an end-to-end callback to conduit ChatGPT.
+
+## 14. Implemented extension: explicit Drive inputs for Codex Jobs
+
+**Implemented after confirmed full-drive OAuth access and a successful media GET of the dot-created test file.** ChatGPT may explicitly name Google Drive files to download before a Codex Job. Historical claims above remain historical. Upload's exact five-field wire and the independent dot message path do not change.
+
+The Job parser accepts exactly the existing four fields `{job_id, workspace, sender, instruction_base64}` or exactly those four plus `drive_inputs`. The added field is a nonempty array of objects with exactly `file_id` and `name`:
+
+```json
+{"job_id":"...","workspace":"...","sender":"...","instruction_base64":"...","drive_inputs":[{"file_id":"<Drive file ID>","name":"batch02/structured_events.json"}]}
+```
+
+Keep existing Job validation and callback selection by registered `sender`. Each `file_id` is a nonempty Drive file ID supplied by ChatGPT, not a URL, folder ID, name search, or ID inferred from prose. Each `name` is a safe relative path using `/` only: reject empty names, absolute paths, backslashes, empty or `.`/`..` components, traversal, platform-invalid names, and duplicate names or IDs. Reject case-insensitive name collisions on Windows. Accept at most eight files, at most 10 MiB per file, and at most 25 MiB combined; check metadata before download and enforce byte limits while streaming. Google-native Docs/Sheets/Slides and folders are unsupported; do not export or fetch arbitrary links. Confirm each ID resolves to an accessible, non-trashed binary file before launching Codex. No folder scan or name lookup is involved.
+
+Use the existing Drive OAuth service for metadata and download. `drive_store.py` currently requests the full `drive` scope, but the actual token grant and access to the specific files need review. A `drive.file`-scoped credential may not read files created by dot or another app. Before implementation and E2E, explicitly decide the smallest workable read permission and file-sharing arrangement; do not silently widen scopes, replace credentials, or add an auth framework. A permission or API failure is a failed preflight.
+
+After validating the complete Job, create the existing workspace-local `.conduit-tmp/job-<random>` directory. Download all named files there under `drive_inputs/`, creating only their validated relative paths. Reject destination collisions and symlink escapes. The `workspace-write` Codex sandbox can read these workspace-local paths. Only after every metadata check and bounded download succeeds, append a short machine-generated section mapping each supplied `name` to its local path to the decoded instruction; preserve the original instruction text and meaning. Then launch Codex with the existing workspace and callback behavior. On any preflight failure, launch no Codex process, send the registered `sender` callback a concise `job_id` and failed input/error, and remove the per-job temporary directory. Clean it after Codex success or failure as well. No persistent input store or retry.
+
+### Review and test checklist
+
+- [x] Confirmed existing full-drive OAuth grant and media GET access to a dot-created binary file; no permission change was needed.
+- [x] Verify both exact Job shapes; reject extra fields, malformed or empty inputs, duplicate IDs/names, unsafe paths, folders, Google-native files, oversized files, and inaccessible IDs. Preserve existing four-field Job, five-field Upload, and dot message behavior.
+- [x] Verify one binary file downloads into the Job temp directory, Codex receives its path, callback uses `sender`, and cleanup runs. Verify a second missing or failed input aborts before Codex, reports one concise error, and cleans partial downloads.
+- [ ] After design review, run a BOJ batch02 E2E with the explicitly identified Drive input covering the six missing meetings. Verify the data is present at the supplied path; separately verify the intended join succeeds. Data presence alone does not prove join success.
+
+Keep this extension to strict parsing, bounded sequential downloads, a small path appendix, callback, and cleanup. Do not add prose-based discovery, folder scans, arbitrary link fetching, exports, caching, manifests, persistent artifacts, orchestration, or speculative recovery machinery.

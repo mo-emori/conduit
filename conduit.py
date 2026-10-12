@@ -20,7 +20,7 @@ from slack_bolt import App
 from slack_bolt.adapter.socket_mode import SocketModeHandler
 
 from callback import notify_chatgpt
-from drive_store import upload_files
+from drive_store import upload_files, download_inputs
 
 
 CONFIG_PATH = Path(__file__).with_name("config.toml")
@@ -211,10 +211,42 @@ def handle_dot_message(message: dict) -> None:
                     value["message_id"], "dot-jobs")
 
 
-def parse_job_object(job: dict) -> dict[str, str]:
+def validate_drive_inputs(inputs: object) -> None:
+    if not isinstance(inputs, list) or not 1 <= len(inputs) <= 8:
+        raise ValueError("invalid drive_inputs")
+    ids, names = set(), set()
+    for item in inputs:
+        if not isinstance(item, dict) or set(item) != {"file_id", "name"}:
+            raise ValueError("invalid drive input")
+        file_id, name = item["file_id"], item["name"]
+        if not isinstance(file_id, str) or not file_id.strip() or not isinstance(name, str):
+            raise ValueError("invalid drive input")
+        parts = name.split("/")
+        if (not name or "\\" in name or PureWindowsPath(name).drive
+                or name.startswith("/") or any(
+                    not part or part in {".", ".."} or
+                    re.search(r'[<>:"\\|?*\x00-\x1f]', part) or
+                    part.rstrip(" .") != part or
+                    part.split(".")[0].upper() in
+                    {"CON", "PRN", "AUX", "NUL", *(f"COM{i}" for i in range(1, 10)),
+                     *(f"LPT{i}" for i in range(1, 10))}
+                    for part in parts)):
+            raise ValueError(f"invalid drive input name: {name}")
+        folded = name.casefold()
+        if file_id in ids or folded in names:
+            raise ValueError(f"duplicate drive input: {name}")
+        ids.add(file_id)
+        names.add(folded)
+    if any(a.startswith(b + "/") for a in names for b in names if a != b):
+        raise ValueError("drive input path collision")
+
+
+def parse_job_object(job: dict) -> dict:
     job = job.copy()
-    if set(job) != JOB_FIELDS:
+    if set(job) not in (JOB_FIELDS, JOB_FIELDS | {"drive_inputs"}):
         raise ValueError("invalid fields")
+    if "drive_inputs" in job:
+        validate_drive_inputs(job["drive_inputs"])
     if not all(isinstance(job[field], str) for field in JOB_FIELDS):
         raise ValueError("invalid fields")
     if not job["job_id"] or not job["workspace"] or not job["sender"]:
@@ -314,7 +346,7 @@ def load_drive_config(path: Path = CONFIG_PATH) -> dict[str, str]:
     return {key: drive[key] for key in required}
 
 
-def run_job(job: dict[str, str]) -> tuple[int, str, str]:
+def run_job(job: dict) -> tuple[int, str, str]:
     codex = shutil.which("codex")
     if not codex:
         return 127, "", "codex executable not found"
@@ -324,8 +356,20 @@ def run_job(job: dict[str, str]) -> tuple[int, str, str]:
     try:
         workspace_path = Path(WORKSPACES[job["workspace"]]["path"]).resolve()
         temp_root = workspace_path / ".conduit-tmp"
+        if temp_root.is_symlink() or (temp_root.exists() and not temp_root.resolve().is_relative_to(workspace_path)):
+            raise OSError("unsafe temporary directory")
         temp_root.mkdir(exist_ok=True)
         job_tmp = tempfile.mkdtemp(prefix="job-", dir=temp_root)
+        instruction = job["instruction"]
+        if "drive_inputs" in job:
+            try:
+                paths = download_inputs(load_drive_config(), job["drive_inputs"],
+                                        Path(job_tmp) / "drive_inputs")
+            except Exception as exc:
+                return 125, "", f"Drive input: {exc}"
+            instruction += "\n\nDrive input files (local paths):\n" + "\n".join(
+                f"{item['name']}: {path}" for item, path in zip(job["drive_inputs"], paths)
+            )
         with tempfile.NamedTemporaryFile(delete=False, suffix=".txt") as output:
             output_path = output.name
         command = [
@@ -366,7 +410,7 @@ def run_job(job: dict[str, str]) -> tuple[int, str, str]:
 
         stderr_thread = threading.Thread(target=read_stderr, daemon=True)
         stderr_thread.start()
-        process.stdin.write(job["instruction"])
+        process.stdin.write(instruction)
         process.stdin.close()
         for line in process.stdout:
             line = line.rstrip("\r\n")
@@ -474,7 +518,8 @@ def handle_text(text: str) -> str:
         else:
             if exit_code == 0:
                 exit_code, stderr = 1, stderr or "Codex produced no final message"
-            result = error_message(job_id, exit_code, stderr)
+            result = (f"job_id: {job_id}; {stderr}" if exit_code == 125
+                      else error_message(job_id, exit_code, stderr))
         callback_result(
             SENDERS[job["sender"]]["callback_url"],
             result,

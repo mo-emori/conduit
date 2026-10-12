@@ -76,6 +76,15 @@ Slack App では Socket Mode を有効にし、`app_token` に `connections:writ
 }
 ```
 
+Optional Drive inputs use the same Job fields plus a nonempty `drive_inputs` array:
+
+```json
+{"job_id":"example-001","workspace":"kairos","sender":"conduit","instruction_base64":"<Base64>","drive_inputs":[{"file_id":"<Drive file ID>","name":"batch02/structured_events.json"}]}
+```
+
+The worker checks all file metadata before downloading, accepts at most 8 binary files (10 MiB each, 25 MiB total), and places them under the per-job workspace-local `.conduit-tmp/job-*/drive_inputs/` directory. Names must be safe relative slash-only paths. Codex starts only after all inputs arrive; the callback reports a preflight failure and partial files are removed. The job directory is removed after Codex completes.
+
+
 `instruction_base64` はsender側の同一tool execution内で、元instructionをUTF-8、
 Base64、JSONの順に機械的に変換して生成してください。Base64 payloadを手作業で
 作成したり、LLMが生成したBase64文字列をコピーしたりしないでください。
