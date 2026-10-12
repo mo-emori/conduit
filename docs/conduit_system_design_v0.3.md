@@ -228,3 +228,38 @@ The sender revision adds no sender manager, routing framework, extra abstraction
 `conduit` v0.3 is the proven v0.2 ChatGPT-to-Codex conduit plus one reviewed, explicit operation that uploads selected workspace-relative files to `My Drive/chatgpt/jobs/<job_id>/` and reports the outcome to ChatGPT.
 
 Nothing in v0.3 changes `conduit` into an agent or an artifact-management system.
+
+## 13. Proposed next-version extension: ChatGPT <-> dot messages
+
+**Design proposal for ChatGPT review before implementation.** This extension adds one independent `message` operation on `#dot-jobs` (`C0C8ABT93J7`) in the ChatGPT Agent Slack workspace. Existing `#codex-jobs` (`C0C4J6WMLJH`) remains the Codex Job and Drive Upload channel, with its strict four-field Job and five-field Upload contracts unchanged. Channel selection isolates the new parser; it does not create a generic dispatcher or agent router.
+
+The dot-to-ChatGPT wire is a standalone JSON object with exactly five fields, in this form:
+
+```json
+{"operation":"message","message_id":"...","sender":"dot","receiver":"conduit","content":"..."}
+```
+
+The five fields are `operation`, `message_id`, `sender`, `receiver`, and `content`; `operation` is `message` and `sender` is `dot`. Dot's reply has no Markdown fence, prefix, or explanatory text. Slack channel and thread identity are Slack metadata, not JSON wire fields. ChatGPT-to-dot Slack text starts with a real `<@U0C6B7D0M51>` mention followed by an instruction and optionally a JSON envelope with `sender` and `receiver` reversed. Dot replies with standalone JSON in that same Slack thread. Conduit does not need to parse outgoing ChatGPT-to-dot text. Inspect actual inbound Slack event formatting before choosing normalization; do not silently add `html.unescape`.
+
+Proposed `config.toml` addition for the next version (not a change to the current file):
+
+```toml
+[dot]
+channel_id = "C0C8ABT93J7"
+user_id = "U0C6B7D0M51"
+```
+
+The existing `#codex-jobs` channel remains in `SLACK_CHANNEL_ID` in `.env` and is not migrated by this proposal. Existing `[senders]` callback URLs remain unchanged.
+
+For inbound dot-to-ChatGPT delivery, `conduit` subscribes to `#dot-jobs` and processes only a validated `message` object from configured Slack user `U0C6B7D0M51` in configured channel `C0C8ABT93J7`. The `sender` field must equal `dot`; the JSON string alone is not authentication. Require a non-empty `message_id` and `content`, and a `receiver` matching a registered ChatGPT sender such as `conduit`. Reject malformed or unaddressed events without callback. Resolve the destination through the existing `[senders.<name>].callback_url` registration (the `conduit` chat is https://chatgpt.com/c/6ac26caf-b63c-83ec-83d0-9f8d926c3df7), never through a URL supplied in the message. Forward the content with attribution identifying dot and its Slack thread, using the existing ChatGPT callback and logging conventions. No Codex execution or Drive upload occurs on this path.
+
+Ignore irrelevant events, echoes, and messages from other Slack senders. Process only dot-authored, receiver-targeted, validated messages. Do not add an event-ID cache or other speculative deduplication state. If actual Slack redelivery causes a duplicate callback, investigate the observed behavior and add the smallest fix. The remaining delivery blocker is Slack app membership in `#dot-jobs`, appropriate event subscription, and actual Socket Mode delivery to conduit; none of these is proven by dot's reply.
+
+### Review checklist and minimal E2E
+
+- [x] In `#dot-jobs`, parent message `1791787454.634039` mentioned dot and instructed a JSON reply. Dot user `U0C6B7D0M51` replied at `1791787473.338719` in the same thread with exactly `{"operation":"message","message_id":"dot-test-001","sender":"dot","receiver":"conduit","content":"DOT_JSON_OK"}` and no fence or explanatory text. This proves dot can emit the required JSON; it does not prove conduit receives the channel.
+- [ ] Confirm Slack app membership, event subscription, Socket Mode receipt, and actual Slack user/channel/thread fields at conduit.
+- [ ] Verify conduit accepts a dot-authored valid reply, logs it, and delivers its content to the registered `conduit` ChatGPT callback end to end.
+- [ ] Verify echoes and irrelevant events are ignored; reject malformed or unaddressed content and a forged `sender=dot` from another Slack user. Check for actual redelivery before designing deduplication.
+
+Keep implementation changes minimal: one channel-specific message path using existing callback and logs. Add no polling service, orchestration, generalized routing, persistent message database, retries, or arbitrary callback URL. The next review gate is actual delivery to conduit through Socket Mode, followed by an end-to-end callback to conduit ChatGPT.

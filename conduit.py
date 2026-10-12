@@ -66,11 +66,14 @@ def load_job_path_prepend(path: Path = CONFIG_PATH) -> list[str]:
 WORKSPACES = load_workspaces()
 SENDERS = load_senders()
 JOB_PATH_PREPEND = load_job_path_prepend()
+with CONFIG_PATH.open("rb") as _config_file:
+    DOT = tomllib.load(_config_file)["dot"]
 
 PING = "LOCAL-AGENT PING"
 PONG = "LOCAL-AGENT PONG — Worker ready"
 JOB_FIELDS = {"job_id", "workspace", "sender", "instruction_base64"}
 UPLOAD_FIELDS = {"operation", "job_id", "workspace", "sender", "paths"}
+MESSAGE_FIELDS = {"operation", "message_id", "sender", "receiver", "content"}
 ENV_KEYS = ("SLACK_BOT_TOKEN", "SLACK_APP_TOKEN", "SLACK_CHANNEL_ID")
 CHATGPT_ATTRIBUTION = re.compile(
     r"\s+\*使用して送信されました\*\s+<@U[A-Z0-9]+>\s*\Z"
@@ -166,6 +169,33 @@ def parse_json_object(text: str) -> dict:
     if not isinstance(value, dict):
         raise ValueError("invalid fields")
     return value
+
+
+def handle_dot_message(message: dict) -> None:
+    if (message.get("channel") != DOT["channel_id"]
+            or message.get("user") != DOT["user_id"] or message.get("subtype")):
+        return
+    text = message.get("text")
+    if not isinstance(text, str):
+        return
+    try:
+        value = parse_json_object(text)
+        if (set(value) != MESSAGE_FIELDS or value["operation"] != "message"
+                or value["sender"] != "dot"
+                or not all(isinstance(value[field], str) for field in MESSAGE_FIELDS)
+                or not value["message_id"].strip() or not value["content"].strip()
+                or value["receiver"] not in SENDERS):
+            raise ValueError("invalid message")
+    except ValueError as exc:
+        logger.info("DOT MESSAGE IGNORED: %s", exc)
+        return
+    thread_ts = message.get("thread_ts") or message.get("ts")
+    result = (f"From dot (message_id: {value['message_id']}, Slack channel: "
+              f"{DOT['channel_id']}, thread: {thread_ts}):\n{value['content']}")
+    logger.info("DOT MESSAGE message_id=%s receiver=%s thread_ts=%s",
+                value["message_id"], value["receiver"], thread_ts)
+    callback_result(SENDERS[value["receiver"]]["callback_url"], result,
+                    value["message_id"], "dot-jobs")
 
 
 def parse_job_object(job: dict) -> dict[str, str]:
@@ -454,6 +484,9 @@ def main() -> None:
 
     @app.message(re.compile(r"[\s\S]*"))
     def receive(message, say):
+        if message.get("channel") == DOT["channel_id"]:
+            handle_dot_message(message)
+            return
         if message.get("channel") != channel_id:
             return
         text = message.get("text")

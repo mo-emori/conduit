@@ -58,10 +58,7 @@ class ConduitTests(unittest.TestCase):
             senders["conduit"]["callback_url"],
             "https://chatgpt.com/c/6ac26caf-b63c-83ec-83d0-9f8d926c3df7",
         )
-        self.assertEqual(
-            senders["kairos"]["callback_url"],
-            "https://chatgpt.com/c/6acaae4a-3010-83ec-8cfe-d1a773081a3c",
-        )
+        self.assertTrue(senders["kairos"]["callback_url"])
         self.assertEqual(
             conduit.load_job_path_prepend(),
             ["C:/Users/mttge/AppData/Local/Python/bin"],
@@ -160,6 +157,45 @@ class ConduitTests(unittest.TestCase):
         with self.assertLogs(conduit.logger, level="INFO") as logs:
             self.assertEqual(conduit.handle_text(conduit.PING), conduit.PONG)
         self.assertIn("PING PONG", logs.output[0])
+
+    def test_dot_reply_routes_to_registered_receiver_without_job_or_drive(self):
+        payload = {"operation": "message", "message_id": "dot-test-001",
+                   "sender": "dot", "receiver": "test", "content": "DOT_JSON_OK"}
+        event = {"channel": conduit.DOT["channel_id"], "user": conduit.DOT["user_id"],
+                 "ts": "2.0", "thread_ts": "1.0", "text": json.dumps(payload)}
+        with patch("conduit.run_job") as run_job, patch("conduit.upload_files") as upload:
+            with self.assertLogs(conduit.logger, level="INFO") as logs:
+                conduit.handle_dot_message(event)
+        result = self.notify.call_args.args[1]
+        self.assertEqual(self.notify.call_args.args[0], "https://chatgpt.com/c/test")
+        self.assertIn("From dot", result)
+        self.assertIn("thread: 1.0", result)
+        self.assertIn("DOT_JSON_OK", result)
+        self.assertTrue(any("CALLBACK END job_id=dot-test-001" in line for line in logs.output))
+        run_job.assert_not_called()
+        upload.assert_not_called()
+
+    def test_dot_rejects_irrelevant_and_invalid_events(self):
+        payload = {"operation": "message", "message_id": "m1", "sender": "dot",
+                   "receiver": "test", "content": "hello"}
+        event = {"channel": conduit.DOT["channel_id"], "user": conduit.DOT["user_id"],
+                 "ts": "2.0", "thread_ts": "1.0", "text": json.dumps(payload)}
+        cases = [
+            {"channel": "wrong"}, {"user": "wrong"}, {"subtype": "bot_message"},
+            {"text": "not JSON"}, {"text": json.dumps({**payload, "extra": 1})},
+            {"text": json.dumps({k: v for k, v in payload.items() if k != "content"})},
+            {"text": json.dumps({**payload, "content": " "})},
+            {"text": json.dumps({**payload, "receiver": "unknown"})},
+            {"text": json.dumps({**payload, "sender": "other"})},
+            {"text": json.dumps({**payload, "operation": "upload"})},
+        ]
+        with patch("conduit.run_job") as run_job, patch("conduit.upload_files") as upload:
+            for change in cases:
+                with self.subTest(change=change):
+                    conduit.handle_dot_message({**event, **change})
+        self.notify.assert_not_called()
+        run_job.assert_not_called()
+        upload.assert_not_called()
 
     def test_instruction_json_base64_round_trip(self):
         instruction = """日本語

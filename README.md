@@ -1,5 +1,7 @@
 # conduit
 
+For dot replies, set `[dot]` in `config.toml` with `channel_id = "C0C8ABT93J7"` and `user_id = "U0C6B7D0M51"`. Keep `.env` `SLACK_CHANNEL_ID` on `#codex-jobs`. Add the Slack app bot to `#dot-jobs` and enable message event subscription for that channel; verify Socket Mode delivery after restarting the Worker.
+
 v0.3 adds an explicit Google Drive upload operation. The current wire requires a sender for both Codex Jobs and Uploads.
 
 `workspace` selects the local execution path. `sender` independently selects the registered ChatGPT callback URL. Both names must be configured, and legacy messages without `sender` are rejected. The wire never contains a callback URL.
