@@ -159,8 +159,10 @@ class ConduitTests(unittest.TestCase):
         self.assertIn("PING PONG", logs.output[0])
 
     def test_dot_reply_routes_to_registered_receiver_without_job_or_drive(self):
+        content = "日本語 https://example.com/a?x=1&y=2 C:\\dev\\conduit\\file.txt"
         payload = {"operation": "message", "message_id": "dot-test-001",
-                   "sender": "dot", "receiver": "test", "content": "DOT_JSON_OK"}
+                   "sender": "dot", "receiver": "test",
+                   "content_base64": base64.b64encode(content.encode("utf-8")).decode("ascii")}
         event = {"channel": conduit.DOT["channel_id"], "user": conduit.DOT["user_id"],
                  "ts": "2.0", "thread_ts": "1.0", "text": json.dumps(payload)}
         with patch("conduit.run_job") as run_job, patch("conduit.upload_files") as upload:
@@ -170,21 +172,27 @@ class ConduitTests(unittest.TestCase):
         self.assertEqual(self.notify.call_args.args[0], "https://chatgpt.com/c/test")
         self.assertIn("From dot", result)
         self.assertIn("thread: 1.0", result)
-        self.assertIn("DOT_JSON_OK", result)
+        self.assertTrue(result.endswith("\n" + content))
         self.assertTrue(any("CALLBACK END job_id=dot-test-001" in line for line in logs.output))
         run_job.assert_not_called()
         upload.assert_not_called()
 
     def test_dot_rejects_irrelevant_and_invalid_events(self):
         payload = {"operation": "message", "message_id": "m1", "sender": "dot",
-                   "receiver": "test", "content": "hello"}
+                   "receiver": "test", "content_base64": "aGVsbG8="}
         event = {"channel": conduit.DOT["channel_id"], "user": conduit.DOT["user_id"],
                  "ts": "2.0", "thread_ts": "1.0", "text": json.dumps(payload)}
         cases = [
             {"channel": "wrong"}, {"user": "wrong"}, {"subtype": "bot_message"},
             {"text": "not JSON"}, {"text": json.dumps({**payload, "extra": 1})},
-            {"text": json.dumps({k: v for k, v in payload.items() if k != "content"})},
-            {"text": json.dumps({**payload, "content": " "})},
+            {"text": json.dumps({k: v for k, v in payload.items() if k != "content_base64"} | {"content": "hello"})},
+            {"text": json.dumps({k: v for k, v in payload.items() if k != "content_base64"})},
+            {"text": json.dumps({**payload, "content": "hello"})},
+            {"text": json.dumps({**payload, "content_base64": ""})},
+            {"text": json.dumps({**payload, "content_base64": "not base64!"})},
+            {"text": json.dumps({**payload, "content_base64": base64.b64encode(b"\xff").decode("ascii")})},
+            {"text": json.dumps({**payload, "content_base64": 123})},
+            {"text": json.dumps({**payload, "message_id": " "})},
             {"text": json.dumps({**payload, "receiver": "unknown"})},
             {"text": json.dumps({**payload, "sender": "other"})},
             {"text": json.dumps({**payload, "operation": "upload"})},
@@ -196,6 +204,23 @@ class ConduitTests(unittest.TestCase):
         self.notify.assert_not_called()
         run_job.assert_not_called()
         upload.assert_not_called()
+
+    def test_dot_invalid_json_logs_position_without_payload_or_callback(self):
+        secret = "SECRET_PAYLOAD https://example.com/token"
+        event = {"channel": conduit.DOT["channel_id"],
+                 "user": conduit.DOT["user_id"], "ts": "123.456",
+                 "text": '{\n"content": "' + secret + '",\n"broken": }'}
+        with self.assertLogs(conduit.logger, level="INFO") as logs:
+            conduit.handle_dot_message(event)
+        self.assertEqual(len(logs.output), 1)
+        line = logs.output[0]
+        self.assertIn("ts=123.456", line)
+        self.assertIn("reason=Expecting value", line)
+        self.assertIn("line=3", line)
+        self.assertIn("col=11", line)
+        self.assertNotIn(secret, line)
+        self.assertNotIn("content", line)
+        self.notify.assert_not_called()
 
     def test_instruction_json_base64_round_trip(self):
         instruction = """日本語

@@ -2,6 +2,8 @@
 
 For dot replies, set `[dot]` in `config.toml` with `channel_id = "C0C8ABT93J7"` and `user_id = "U0C6B7D0M51"`. Keep `.env` `SLACK_CHANNEL_ID` on `#codex-jobs`. Add the Slack app bot to `#dot-jobs` and enable message event subscription for that channel; verify Socket Mode delivery after restarting the Worker.
 
+Dot replies in `#dot-jobs` use exactly `{"operation":"message","message_id":"...","sender":"dot","receiver":"conduit","content_base64":"<UTF-8 Base64>"}`. Dot must generate the Base64 with a tool or programmatic conversion and verify it by reverse decoding; never guess it manually. The Worker strictly decodes the field and forwards the original text to the registered ChatGPT callback. The old `content` field is rejected. ChatGPT-to-dot instructions still mention dot normally; this change does not alter outbound Slack text.
+
 v0.3 adds an explicit Google Drive upload operation. The current wire requires a sender for both Codex Jobs and Uploads.
 
 `workspace` selects the local execution path. `sender` independently selects the registered ChatGPT callback URL. Both names must be configured, and legacy messages without `sender` are rejected. The wire never contains a callback URL.

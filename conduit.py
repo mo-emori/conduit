@@ -73,7 +73,7 @@ PING = "LOCAL-AGENT PING"
 PONG = "LOCAL-AGENT PONG — Worker ready"
 JOB_FIELDS = {"job_id", "workspace", "sender", "instruction_base64"}
 UPLOAD_FIELDS = {"operation", "job_id", "workspace", "sender", "paths"}
-MESSAGE_FIELDS = {"operation", "message_id", "sender", "receiver", "content"}
+MESSAGE_FIELDS = {"operation", "message_id", "sender", "receiver", "content_base64"}
 ENV_KEYS = ("SLACK_BOT_TOKEN", "SLACK_APP_TOKEN", "SLACK_CHANNEL_ID")
 CHATGPT_ATTRIBUTION = re.compile(
     r"\s+\*使用して送信されました\*\s+<@U[A-Z0-9]+>\s*\Z"
@@ -183,15 +183,28 @@ def handle_dot_message(message: dict) -> None:
         if (set(value) != MESSAGE_FIELDS or value["operation"] != "message"
                 or value["sender"] != "dot"
                 or not all(isinstance(value[field], str) for field in MESSAGE_FIELDS)
-                or not value["message_id"].strip() or not value["content"].strip()
+                or not value["message_id"].strip() or not value["content_base64"]
                 or value["receiver"] not in SENDERS):
             raise ValueError("invalid message")
+        try:
+            content = base64.b64decode(value["content_base64"], validate=True).decode(
+                "utf-8", errors="strict"
+            )
+        except (binascii.Error, ValueError) as exc:
+            raise ValueError("invalid message content") from exc
+        if not content:
+            raise ValueError("empty message content")
     except ValueError as exc:
-        logger.info("DOT MESSAGE IGNORED: %s", exc)
+        if isinstance(exc.__cause__, json.JSONDecodeError):
+            cause = exc.__cause__
+            logger.info("DOT MESSAGE IGNORED: invalid JSON ts=%s reason=%s line=%s col=%s",
+                        message.get("ts"), cause.msg, cause.lineno, cause.colno)
+        else:
+            logger.info("DOT MESSAGE IGNORED: %s", exc)
         return
     thread_ts = message.get("thread_ts") or message.get("ts")
     result = (f"From dot (message_id: {value['message_id']}, Slack channel: "
-              f"{DOT['channel_id']}, thread: {thread_ts}):\n{value['content']}")
+              f"{DOT['channel_id']}, thread: {thread_ts}):\n{content}")
     logger.info("DOT MESSAGE message_id=%s receiver=%s thread_ts=%s",
                 value["message_id"], value["receiver"], thread_ts)
     callback_result(SENDERS[value["receiver"]]["callback_url"], result,
