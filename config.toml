@@ -2,7 +2,7 @@ job_path_prepend = ["C:/Users/mttge/AppData/Local/Python/bin"]
 
 [drive]
 jobs_folder_id = "1kxOC1_uT4hdWDrg5VQ__YE0Hdux4h5bm"
-credentials_file = "C:/Users/mttge/AppData/Roaming/conduit/client_secret_448291199786-472jda81ql0f7c7c4rv66jlu307dsg6j.apps.googleusercontent.com.json"
+credentials_file = "C:/Users/mttge/AppData/Roaming/conduit/credentials.json"
 token_file = "C:/Users/mttge/AppData/Roaming/conduit/token.json"
 
 [workspaces.conduit]
